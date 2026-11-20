@@ -1,6 +1,14 @@
 import React from 'react'
 import { createRoot } from 'react-dom/client'
 import App from './App.jsx'
+import '@fontsource/lexend/500.css'
+import '@fontsource/lexend/600.css'
+import '@fontsource/source-sans-3/400.css'
+import '@fontsource/source-sans-3/600.css'
+import '@fontsource/noto-sans-gujarati/400.css'
+import '@fontsource/noto-sans-gujarati/600.css'
+import '@fontsource/noto-sans-devanagari/400.css'
+import '@fontsource/noto-sans-devanagari/600.css'
 import './styles.css'
 
 class Boundary extends React.Component {

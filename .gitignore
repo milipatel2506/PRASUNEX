@@ -1,0 +1,14 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Node
+node_modules/
+
+# Local demo database (recreated automatically on first start)
+backend/data/saarthi.db
+
+# Secrets, never commit
+.env
+*.key

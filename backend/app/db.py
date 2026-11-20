@@ -43,7 +43,16 @@ USERS = [
     ("nikhil", "demo123", "Mr. Nikhil Desai", "teacher", ["8A", "8B"]),
     ("rina", "demo123", "Ms. Rina Joshi", "teacher", ["10A"]),
     ("principal", "demo123", "Dr. Anil Mehta", "principal", CLASSES),
+    ("admin", "demo123", "Mr. Rajesh Patel", "admin", CLASSES),
 ]
+
+# Columns added after the first release. Applied on every start so older demo databases keep working.
+MIGRATIONS = {
+    "students": {"parent_name": "TEXT", "parent_phone": "TEXT"},
+    "users": {"active": "INTEGER DEFAULT 1"},
+    "messages": {"parent_phone": "TEXT", "provider": "TEXT DEFAULT 'simulated'", "provider_sid": "TEXT",
+                 "error": "TEXT", "sent_at": "TEXT", "delivered_at": "TEXT", "read_at": "TEXT"},
+}
 # Probability that an action of this kind led to improvement (used only for the seeded "last term" history).
 KIND_SUCCESS = {"parent_contact": 0.62, "remedial_session": 0.72, "practice_test": 0.55, "homework_checklist": 0.58,
                 "counselling": 0.5, "peer_support": 0.52, "progress_check": 0.4, "goal_setting": 0.54}
@@ -74,12 +83,26 @@ def connect() -> sqlite3.Connection:
     return con
 
 
+def migrate(con: sqlite3.Connection) -> None:
+    for table, cols in MIGRATIONS.items():
+        have = {r["name"] for r in con.execute(f"PRAGMA table_info({table})").fetchall()}
+        for col, decl in cols.items():
+            if col not in have:
+                con.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+    con.execute("UPDATE users SET active=1 WHERE active IS NULL")
+    con.execute("UPDATE students SET parent_name='Parent of ' || first_en WHERE parent_name IS NULL")
+    con.execute("UPDATE students SET parent_phone='+91 00000 ' || printf('%05d', id) WHERE parent_phone IS NULL")
+    con.commit()
+
+
 def init() -> None:
     con = connect()
     try:
         con.executescript(SCHEMA)
+        migrate(con)
         if con.execute("SELECT COUNT(*) FROM students").fetchone()[0] == 0:
             seed(con)
+            migrate(con)
     finally:
         con.close()
 
@@ -92,7 +115,7 @@ def seed(con: sqlite3.Connection) -> None:
     scores = model.score(X)
 
     for u in USERS:
-        con.execute("INSERT INTO users(username,password,name,role,classes) VALUES(?,?,?,?,?)",
+        con.execute("INSERT INTO users(username,password,name,role,classes,active) VALUES(?,?,?,?,?,1)",
                     (u[0], hash_pw(u[1]), u[2], u[3], json.dumps(u[4])))
     used = set()
     langs = rng.choice(["gu", "hi", "en"], n, p=[0.5, 0.3, 0.2])
@@ -104,7 +127,8 @@ def seed(con: sqlite3.Connection) -> None:
                 used.add((f[0], s))
                 break
         cls = CLASSES[i // PER_CLASS]
-        con.execute("INSERT INTO students VALUES(?,?,?,?,?,?,?,?,?)",
+        con.execute("INSERT INTO students(id,name,first_en,first_gu,first_hi,cls,roll,gender,parent_language) "
+                    "VALUES(?,?,?,?,?,?,?,?,?)",
                     (i + 1, f"{f[0]} {s}", f[0], f[1], f[2], cls, i % PER_CLASS + 1, str(d["gender"][i]), str(langs[i])))
         for w in range(CURRENT_WEEK):
             m = d["marks"][i, w]

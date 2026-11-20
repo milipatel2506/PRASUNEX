@@ -1,6 +1,7 @@
 """SAARTHI API: risk radar, explainable reasons, AI action plans, parent messages, outcome tracking."""
 from __future__ import annotations
 import json
+import re
 import secrets
 import time
 from contextlib import asynccontextmanager
@@ -11,7 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import actions, db, model
+from . import actions, db, model, whatsapp
 from .content import LANGS
 from .datagen import SUBJECT_LABEL
 
@@ -59,8 +60,20 @@ def user_dep(authorization: str | None = Header(default=None)) -> dict:
     return {**user, "token": token}
 
 
+OVERSIGHT = ("principal", "admin")  # roles that see every class
+
+
 def can_see(user: dict, cls: str) -> bool:
-    return user["role"] == "principal" or cls in user["classes"]
+    return user["role"] in OVERSIGHT or cls in user["classes"]
+
+
+def all_classes() -> list[str]:
+    names = {r["cls"] for r in q("SELECT DISTINCT cls FROM students")}
+    return sorted(names, key=lambda c: (int(re.sub(r"\D", "", c) or 0), c))
+
+
+def my_classes(user: dict) -> list[str]:
+    return all_classes() if user["role"] in OVERSIGHT else user["classes"]
 
 
 def get_student(sid: int, user: dict) -> dict:
@@ -73,10 +86,12 @@ def get_student(sid: int, user: dict) -> dict:
     return rows[0]
 
 
-def get_risk(sid: int) -> dict:
-    r = q("SELECT * FROM risk WHERE student_id=?", (sid,))[0]
-    r["reasons"] = json.loads(r["reasons"])
-    return r
+def get_risk(sid: int) -> dict | None:
+    rows = q("SELECT * FROM risk WHERE student_id=?", (sid,))
+    if not rows:
+        return None  # not scored yet: fewer than 4 weeks of data
+    rows[0]["reasons"] = json.loads(rows[0]["reasons"])
+    return rows[0]
 
 
 def plan_out(p: dict) -> dict:
@@ -105,6 +120,8 @@ def login(body: Login):
     if not rows or not db.check_pw(body.password, rows[0]["password"]):
         FAILS[name] = recent + [time.time()]
         raise HTTPException(401, "Wrong username or password")
+    if rows[0].get("active") == 0:
+        raise HTTPException(403, "This account is disabled. Please contact the school admin.")
     FAILS.pop(name, None)
     u = rows[0]
     user = {"username": u["username"], "name": u["name"], "role": u["role"], "classes": json.loads(u["classes"])}
@@ -133,7 +150,7 @@ def health():
 @app.get("/api/classes")
 def classes(user: dict = Depends(user_dep)):
     out = []
-    for c in user["classes"]:
+    for c in my_classes(user):
         rows = q("SELECT r.tier, COUNT(*) n FROM risk r JOIN students s ON s.id=r.student_id WHERE s.cls=? GROUP BY r.tier", (c,))
         t = {r["tier"]: r["n"] for r in rows}
         out.append({"cls": c, "high": t.get("high", 0), "medium": t.get("medium", 0), "low": t.get("low", 0)})
@@ -146,9 +163,12 @@ def students(cls: str, user: dict = Depends(user_dep)):
         raise HTTPException(403, "This class is not yours")
     rows = q("""SELECT s.id, s.name, s.cls, s.roll, s.parent_language, r.risk, r.tier, r.reasons,
                 (SELECT status FROM plans p WHERE p.student_id=s.id ORDER BY (p.status='approved') DESC, p.id DESC LIMIT 1) plan_status
-                FROM students s JOIN risk r ON r.student_id=s.id WHERE s.cls=? ORDER BY r.risk DESC""", (cls,))
+                FROM students s LEFT JOIN risk r ON r.student_id=s.id WHERE s.cls=?
+                ORDER BY r.risk IS NULL, r.risk DESC, s.roll""", (cls,))
     for r in rows:
-        r["reasons"] = json.loads(r["reasons"])
+        r["reasons"] = json.loads(r["reasons"]) if r["reasons"] else []
+        r["tier"] = r["tier"] or "unscored"
+        r["risk"] = r["risk"] or 0.0
     return rows
 
 
@@ -161,8 +181,9 @@ def student_detail(sid: int, user: dict = Depends(user_dep)):
         w["marks_avg"] = sum(w[k] for k in SUBJECT_LABEL) / len(SUBJECT_LABEL)
     plans = [plan_out(p) for p in q("SELECT * FROM plans WHERE student_id=? ORDER BY id DESC", (sid,))]
     ints = q("SELECT * FROM interventions WHERE student_id=? ORDER BY id DESC", (sid,))
-    return {"student": s, "risk": r, "weekly": weekly, "plans": plans, "interventions": ints,
-            "weakest_subject_label": SUBJECT_LABEL[r["weakest_subject"]]}
+    return {"student": {**s, "parent_phone": whatsapp.mask(s.get("parent_phone"))}, "risk": r, "weekly": weekly,
+            "plans": plans, "interventions": ints,
+            "weakest_subject_label": SUBJECT_LABEL[r["weakest_subject"]] if r else None}
 
 
 # ---------- action plans -----------------------------------------------------------
@@ -184,6 +205,8 @@ def make_plan(sid: int, body: PlanReq, user: dict = Depends(user_dep)):
     if lang not in LANGS:
         raise HTTPException(400, "Unsupported language")
     r = get_risk(sid)
+    if r is None:
+        raise HTTPException(409, "Not scored yet: enter at least 4 weeks of data on the Weekly data page first")
     res = actions.generate_plan(s, r, lang)
     pid = run("INSERT INTO plans(student_id,created_at,provider,language,actions,topics,message,flags) VALUES(?,?,?,?,?,?,?,?)",
               (sid, db.now(), res["provider"], lang, json.dumps(res["actions"]), json.dumps(res["topics"], ensure_ascii=False),
@@ -244,6 +267,7 @@ def approve(pid: int, body: ApproveReq, user: dict = Depends(user_dep)):
         raise HTTPException(422, f"Blocked by safety check: {', '.join(flags)}")
     acts = [a.model_dump() for a in body.actions]
     con = db.connect()
+    mid = None
     try:
         # claim the plan atomically so a double-click cannot approve (and send) twice
         cur = con.execute("UPDATE plans SET status='approved', actions=?, message=?, language=?, approved_by=?, "
@@ -251,8 +275,11 @@ def approve(pid: int, body: ApproveReq, user: dict = Depends(user_dep)):
                           (json.dumps(acts), body.message, body.language, user["name"], db.now(), pid))
         if cur.rowcount == 0:
             raise HTTPException(409, "Already approved")
-        con.execute("INSERT INTO messages(plan_id,student_id,channel,language,body,status,ts) VALUES(?,?,?,?,?,?,?)",
-                    (pid, s["id"], "whatsapp (simulated)", body.language, body.message, "delivered (simulated)", db.now()))
+        mid = con.execute(
+            "INSERT INTO messages(plan_id,student_id,channel,language,body,status,ts,parent_phone,provider,sent_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (pid, s["id"], "whatsapp (simulated)", body.language, body.message, "sent", db.now(),
+             s.get("parent_phone"), "simulated", db.now())).lastrowid
         for a in acts:
             con.execute("INSERT INTO interventions(student_id,plan_id,kind,text,outcome,created_at,source) "
                         "VALUES(?,?,?,?,NULL,?,?)", (s["id"], pid, a["kind"], a["text"], db.now(), "live"))
@@ -266,7 +293,11 @@ def approve(pid: int, body: ApproveReq, user: dict = Depends(user_dep)):
         raise
     finally:
         con.close()
-    return plan_out(q("SELECT * FROM plans WHERE id=?", (pid,))[0])
+    from .extra import deliver_message  # imported here: extra.py registers its routes on this app
+    deliver_message(mid)
+    out = plan_out(q("SELECT * FROM plans WHERE id=?", (pid,))[0])
+    out["message_id"] = mid
+    return out
 
 
 class OutcomeReq(BaseModel):
@@ -287,15 +318,15 @@ def outcome(iid: int, body: OutcomeReq, user: dict = Depends(user_dep)):
 
 # ---------- principal --------------------------------------------------------------
 def _principal(user: dict) -> None:
-    if user["role"] != "principal":
-        raise HTTPException(403, "Principal access only")
+    if user["role"] not in OVERSIGHT:
+        raise HTTPException(403, "Principal or admin access only")
 
 
 @app.get("/api/principal/overview")
 def overview(user: dict = Depends(user_dep)):
     _principal(user)
     by_class = []
-    for c in db.CLASSES:
+    for c in all_classes():
         rows = q("SELECT r.tier, COUNT(*) n FROM risk r JOIN students s ON s.id=r.student_id WHERE s.cls=? GROUP BY r.tier", (c,))
         t = {r["tier"]: r["n"] for r in rows}
         by_class.append({"cls": c, "high": t.get("high", 0), "medium": t.get("medium", 0), "low": t.get("low", 0)})
@@ -334,6 +365,11 @@ def audit(user: dict = Depends(user_dep)):
 @app.get("/api/model")
 def model_info(user: dict = Depends(user_dep)):
     return {**model.info(), "ai": actions.provider_info()}
+
+
+# Extra API: weekly data entry, admin, messages outbox, WhatsApp. Imported BEFORE the static mount below,
+# because a mount at "/" would otherwise swallow these routes.
+from . import extra  # noqa: E402,F401
 
 
 # ---------- static frontend (built React app) ------------------------------------

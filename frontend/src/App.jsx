@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useRef, useState } from 'react'
-import { BarChart3, LogOut, RefreshCw, ScrollText, Send, ShieldCheck, Users, Volume2 } from 'lucide-react'
+import { BarChart3, ClipboardList, GraduationCap, LogOut, MessageSquare, RefreshCw, ScrollText, Send, Settings as SettingsIcon, ShieldCheck, UserCog, Users, Volume2 } from 'lucide-react'
 import { api, hasToken, setToken } from './api'
+import { AdminStudents, AdminUsers, MessagesPage, ROLE, SettingsPage, WeeklyPage } from './pages'
 
 const LANG = { en: 'English', gu: 'ગુજરાતી', hi: 'हिन्दी' }
 const LANG_NAME = { en: 'English', gu: 'Gujarati', hi: 'Hindi' }
@@ -9,13 +10,14 @@ const KIND = {
   homework_checklist: 'Homework checklist', counselling: 'Counselling', peer_support: 'Peer support',
   progress_check: 'Progress check', goal_setting: 'Goal setting',
 }
-const TIER = { high: 'High', medium: 'Medium', low: 'Low' }
-const TIER_BAR = { high: 'var(--danger-bar)', medium: 'var(--warn-bar)', low: 'var(--ok-bar)' }
+const TIER = { high: 'High', medium: 'Medium', low: 'Low', unscored: 'Not scored' }
+const TIER_BAR = { high: 'var(--danger-bar)', medium: 'var(--warn-bar)', low: 'var(--ok-bar)', unscored: 'var(--line-strong)' }
 const ACCOUNTS = [
-  { u: 'hetal', name: 'Ms. Hetal Shah', note: 'Teacher, classes 9A and 9B', ini: 'HS' },
-  { u: 'nikhil', name: 'Mr. Nikhil Desai', note: 'Teacher, classes 8A and 8B', ini: 'ND' },
-  { u: 'rina', name: 'Ms. Rina Joshi', note: 'Teacher, class 10A', ini: 'RJ' },
-  { u: 'principal', name: 'Dr. Anil Mehta', note: 'Principal, whole school view and AI audit log', ini: 'AM' },
+  { u: 'hetal', name: 'Ms. Hetal Shah', note: 'Faculty, classes 9A and 9B', ini: 'HS' },
+  { u: 'nikhil', name: 'Mr. Nikhil Desai', note: 'Faculty, classes 8A and 8B', ini: 'ND' },
+  { u: 'rina', name: 'Ms. Rina Joshi', note: 'Faculty, class 10A', ini: 'RJ' },
+  { u: 'principal', name: 'Dr. Anil Mehta', note: 'Principal, read-only view of the whole school', ini: 'AM' },
+  { u: 'admin', name: 'Mr. Rajesh Patel', note: 'Admin, manages accounts, students and settings', ini: 'RP' },
 ]
 const pct = (x) => Math.round(x * 100) + '%'
 const initials = (n) => n.replace(/^(Ms|Mr|Dr)\.\s*/, '').split(' ').map((w) => w[0]).join('').slice(0, 2)
@@ -77,16 +79,20 @@ function PageHead({ title, sub }) {
 
 /* ---------- sign in ---------- */
 function Login({ onLogin }) {
+  const [u, setU] = useState('')
+  const [p, setP] = useState('')
+  const [show, setShow] = useState(false)
   const [err, setErr] = useState('')
   const [busy, setBusy] = useState(false)
-  const go = async (username) => {
+  const submit = async (e) => {
+    e.preventDefault()
     if (busy) return
     setBusy(true); setErr('')
     try {
-      const r = await api('/login', { method: 'POST', body: { username, password: 'demo123' } })
+      const r = await api('/login', { method: 'POST', body: { username: u.trim(), password: p } })
       setToken(r.token)
       onLogin(r.user)
-    } catch (e) { setErr(e.message) }
+    } catch (x) { setErr(x.message) }
     setBusy(false)
   }
   return (
@@ -95,21 +101,33 @@ function Login({ onLogin }) {
         <div className="wordmark">SAARTHI</div>
         <div>
           <h1>Student Success Copilot</h1>
-          <p>Early warning for students who are falling behind, with clear reasons, practical actions for teachers,
+          <p>Early warning for students who are falling behind, with clear reasons, practical actions for faculty,
             and messages parents can read in their own language.</p>
         </div>
         <div className="login-foot">Team InnoTech | Prasunex Innovathon 2026</div>
       </aside>
       <main className="login-form">
         <h2>Sign in</h2>
-        <p className="muted">Choose a demo account. All data in this prototype is synthetic.</p>
-        {err && <div className="error" role="alert">{err}</div>}
+        <p className="muted">Use your school account. Admin, faculty and principal accounts open different screens.</p>
+        <form className="form" onSubmit={submit}>
+          <label>Username<input autoComplete="username" required autoFocus value={u} onChange={(e) => setU(e.target.value)} /></label>
+          <label>Password
+            <span className="pw">
+              <input type={show ? 'text' : 'password'} autoComplete="current-password" required value={p} onChange={(e) => setP(e.target.value)} />
+              <button type="button" className="btn alt" aria-pressed={show} onClick={() => setShow(!show)}>{show ? 'Hide' : 'Show'}</button>
+            </span>
+          </label>
+          {err && <div className="error" role="alert" style={{ margin: 0 }}>{err}</div>}
+          <div><button className="btn" type="submit" disabled={busy}>{busy ? 'Signing in...' : 'Sign in'}</button></div>
+        </form>
+        <h3 className="sec" style={{ marginTop: 28 }}>Demo accounts (password: demo123)</h3>
         <ul className="accounts">
           {ACCOUNTS.map((a) => (
             <li key={a.u}>
-              <button className="account" disabled={busy} onClick={() => go(a.u)}>
+              <button type="button" className="account" onClick={() => { setU(a.u); setP('demo123'); setErr('') }}>
                 <span className="avatar" aria-hidden="true">{a.ini}</span>
                 <span><b>{a.name}</b><small>{a.note}</small></span>
+                <span className="fill">Fill in</span>
               </button>
             </li>
           ))}
@@ -142,6 +160,22 @@ function StudentPanel({ sid, onChanged }) {
   if (!d) return <div className="panel" role="status">{err || 'Loading...'}</div>
 
   const { student: s, risk, weekly } = d
+  if (!risk) {
+    return (
+      <div className="stack">
+        <section className="panel">
+          <div className="hdr">
+            <div>
+              <h2>{s.name}</h2>
+              <div className="meta"><span>Class <b>{s.cls}</b>, roll {s.roll}</span><span>Parent <b>{s.parent_name}</b></span></div>
+            </div>
+            <Tag kind="unscored">Not scored</Tag>
+          </div>
+          <div className="note" style={{ margin: 0 }}>Not scored yet. SAARTHI needs at least 4 weeks of attendance, marks and homework for this student. Enter them on the Weekly data page, and the risk score will appear here.</div>
+        </section>
+      </div>
+    )
+  }
   const approved = plan && plan.status === 'approved'
 
   const wrap = async (fn) => { setBusy(true); setErr(''); try { await fn() } catch (e) { setErr(e.message) } finally { setBusy(false) } }
@@ -246,7 +280,7 @@ function StudentPanel({ sid, onChanged }) {
               <LangSwitch onPick={switchLang} disabled={approved || busy} />
               <div className="phone">
                 <div className="bar2">Parent of {s.first_en} | WhatsApp (simulated)</div>
-                <div className="bubble">{msg}<div className="tick">{approved ? '✓✓ delivered (simulated)' : 'draft'}</div></div>
+                <div className="bubble">{msg}<div className="tick">{approved ? '✓ sent' : 'draft'}</div></div>
               </div>
               {!approved && <textarea style={{ marginTop: 12, minHeight: 110 }} value={msg} onChange={(e) => setMsg(e.target.value)} aria-label="Edit message" />}
               <div className="row" style={{ marginTop: 12, flexWrap: 'wrap' }}>
@@ -255,7 +289,7 @@ function StudentPanel({ sid, onChanged }) {
                 {!approved && <button className="btn alt" disabled={busy} onClick={create}><RefreshCw size={16} aria-hidden="true" />Redraft</button>}
               </div>
               {voiceNote && <div className="flag">{voiceNote}</div>}
-              {approved && <div className="ok">Sent by {plan.approved_by}. Sending is simulated in this prototype.</div>}
+              {approved && <div className="ok">Approved by {plan.approved_by} and sent to {s.parent_name} ({s.parent_phone}). Track delivery on the Messages page.</div>}
             </div>
           </div>
         )}
@@ -307,7 +341,7 @@ function Classes() {
   useEffect(() => { loadClasses() }, [])
   useEffect(() => { setSel(null); loadList() }, [cur])
 
-  const flagged = list.filter((s) => s.tier !== 'low')
+  const flagged = list.filter((s) => s.tier === 'high' || s.tier === 'medium')
   const shown = all ? list : flagged
   return (
     <div className="page">
@@ -331,10 +365,10 @@ function Classes() {
               <button key={s.id} aria-current={sel === s.id} className={'student' + (sel === s.id ? ' on' : '')} onClick={() => setSel(s.id)}>
                 <div className="l1">
                   <span className="name">{s.name}</span>
-                  <span className="score"><span className="n">{pct(s.risk)}</span><Tag kind={s.tier}>{TIER[s.tier]}</Tag></span>
+                  <span className="score"><span className="n">{s.tier === 'unscored' ? '' : pct(s.risk)}</span><Tag kind={s.tier}>{TIER[s.tier]}</Tag></span>
                 </div>
                 <div className="l2">
-                  <span>{s.reasons.length ? s.reasons.map((r) => r.label).join(', ') : 'On track'}</span>
+                  <span>{s.tier === 'unscored' ? 'Needs 4 weeks of data' : s.reasons.length ? s.reasons.map((r) => r.label).join(', ') : 'On track'}</span>
                   {s.plan_status && <Tag kind={s.plan_status}>{s.plan_status === 'approved' ? 'Sent' : 'Draft'}</Tag>}
                 </div>
                 <div className="riskbar"><i style={{ width: s.risk * 100 + '%', background: TIER_BAR[s.tier] }} /></div>
@@ -498,34 +532,51 @@ export default function App() {
   if (!ready) return null
   if (!user) return <Login onLogin={(u) => { setUser(u); setTab('classes') }} />
 
-  const principal = user.role === 'principal'
-  const tabs = [
-    ['classes', principal ? 'All classes' : 'My classes', Users, 'Risk radar', 'Students ranked by risk of falling behind'],
-    ...(principal ? [['overview', 'School overview', BarChart3, 'School overview', 'Risk and outcomes across every class'],
-                     ['audit', 'AI audit log', ScrollText, 'AI audit log', 'Everything the AI was given and produced']] : []),
-    ['model', 'Model and safety', ShieldCheck, 'Model and safety', 'How the risk model performs and how data is protected'],
-  ]
-  const cur = tabs.find((t) => t[0] === tab) || tabs[0]
+  const role = user.role
+  const all = role !== 'teacher'
+  const T = {
+    classes: [all ? 'All classes' : 'My classes', Users, 'Risk radar', 'Students ranked by risk of falling behind'],
+    weekly: ['Weekly data', ClipboardList, 'Weekly data entry', "Enter this week's attendance, homework and marks"],
+    messages: ['Messages', MessageSquare, 'Messages', 'Parent messages and their delivery status'],
+    overview: ['School overview', BarChart3, 'School overview', 'Risk and outcomes across every class'],
+    students: ['Students', GraduationCap, 'Students', 'Add students, import a spreadsheet, and manage parent contacts'],
+    users: ['Users', UserCog, 'Users and roles', 'Faculty, principal and admin accounts'],
+    settings: ['Settings', SettingsIcon, 'Settings', 'WhatsApp delivery and the AI message writer'],
+    audit: ['AI audit log', ScrollText, 'AI audit log', 'Everything the AI was given and produced'],
+    model: ['Model and safety', ShieldCheck, 'Model and safety', 'How the risk model performs and how data is protected'],
+  }
+  const order = role === 'teacher' ? ['classes', 'weekly', 'messages', 'model']
+    : role === 'principal' ? ['classes', 'overview', 'messages', 'audit', 'model']
+    : ['classes', 'overview', 'weekly', 'messages', 'students', 'users', 'settings', 'audit', 'model']
+  const cur = T[order.includes(tab) ? tab : 'classes']
   return (
     <div className="app">
       <aside className="side">
         <div className="brand">SAARTHI<small>Student Success Copilot</small></div>
         <nav className="nav" aria-label="Main">
-          {tabs.map(([k, label, Icon]) => (
-            <button key={k} className={tab === k ? 'on' : ''} aria-current={tab === k ? 'page' : undefined} onClick={() => setTab(k)}>
-              <Icon size={18} aria-hidden="true" />{label}
-            </button>
-          ))}
+          {order.map((k) => {
+            const Icon = T[k][1]
+            return (
+              <button key={k} className={tab === k ? 'on' : ''} aria-current={tab === k ? 'page' : undefined} onClick={() => setTab(k)}>
+                <Icon size={18} aria-hidden="true" />{T[k][0]}
+              </button>
+            )
+          })}
         </nav>
         <div className="who">
-          <div className="who-row"><span className="avatar" aria-hidden="true">{initials(user.name)}</span><div><b>{user.name}</b><small>{principal ? 'Principal' : 'Teacher'}</small></div></div>
+          <div className="who-row"><span className="avatar" aria-hidden="true">{initials(user.name)}</span><div><b>{user.name}</b><small>{ROLE[role]}</small></div></div>
           <button className="signout" onClick={() => { setToken(''); setUser(null) }}><LogOut size={16} aria-hidden="true" />Sign out</button>
         </div>
       </aside>
       <div className="main">
-        <PageHead title={cur[3]} sub={cur[4]} />
+        <PageHead title={cur[2]} sub={cur[3]} />
         {tab === 'classes' && <Classes />}
+        {tab === 'weekly' && <WeeklyPage />}
+        {tab === 'messages' && <MessagesPage />}
         {tab === 'overview' && <Overview />}
+        {tab === 'students' && <AdminStudents />}
+        {tab === 'users' && <AdminUsers me={user} />}
+        {tab === 'settings' && <SettingsPage />}
         {tab === 'audit' && <Audit />}
         {tab === 'model' && <ModelPage />}
       </div>

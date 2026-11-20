@@ -24,15 +24,30 @@ Reset the demo data at any time: `cd backend` then `.venv\Scripts\python -m app.
 
 ### Demo sign-ins (password for all: `demo123`)
 
-| User | Role | Sees |
+| Username | Role | Can do |
 |---|---|---|
-| hetal | Teacher | classes 9A, 9B |
-| nikhil | Teacher | classes 8A, 8B |
-| rina | Teacher | class 10A |
-| principal | Principal | whole school, AI audit log |
+| hetal | Faculty | classes 9A, 9B: weekly data, action plans, approve messages, track delivery |
+| nikhil | Faculty | classes 8A, 8B |
+| rina | Faculty | class 10A |
+| principal | Principal | read-only view of every class, school overview, messages, AI audit log |
+| admin | Admin | everything above, plus users, students, parent contacts and settings |
+
+Sign in with the username and password form (the demo accounts on the sign-in page fill it in for you).
 
 The demo password is for the prototype only. Passwords are stored hashed, logins are rate limited and tokens expire;
 a real deployment would add single sign-on.
+
+### Optional: real WhatsApp messages (Twilio sandbox, free)
+
+1. Create a free Twilio account and open the WhatsApp sandbox page. From your phone, send the shown join code
+   to the sandbox number on WhatsApp.
+2. Set these environment variables before starting the app: `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`,
+   `TWILIO_WHATSAPP_FROM` (the sandbox number, +14155238886). Never put them in code or commit them.
+3. Sign in as admin, open Students, edit one student's parent contact and enter your own phone number.
+4. Sign in as faculty and approve a plan for that student. The message arrives on your phone, and the Messages page
+   shows its status (use Refresh status). Admin, Settings shows whether WhatsApp is connected.
+
+Placeholder demo numbers (+91 00000 ...) are never sent to, even when WhatsApp is connected.
 
 ### Optional: use a real AI model
 
@@ -51,7 +66,12 @@ details. Its output passes guardrails; on any failure the template engine takes 
 - Approve-before-send workflow; sending is simulated
 - Outcome tracker and "which actions work best" chart
 - Principal view: school overview and an AI audit log showing exactly what was sent to the AI
-- Role-based access: teachers cannot open other teachers' classes
+- Username and password sign-in with three roles (Faculty, Principal, Admin); faculty cannot open other classes
+- Weekly data entry: faculty record attendance, homework, incidents and marks; risk scores update immediately
+- Admin: create and disable accounts, reset passwords, assign classes, add students, import a CSV, edit parent contacts
+- Messages outbox: every parent message with parent, language and status (sent, delivered, read, failed), plus a
+  phone view of what the parent sees
+- Optional real WhatsApp delivery through the Twilio sandbox (off by default; see below)
 - Safety checks: blocked phrases, contact details, wrong-script detection, length limit, template fallback
 
 ## Model results (synthetic held-out data)
@@ -63,14 +83,17 @@ numbers show that the pipeline works, not real-world accuracy.
 
 ## Tests
 
-28 automated tests cover login and access control, safe approval (no double-send, blocked phone numbers and links,
-input limits), the AI guardrails, the anonymised audit log and the model. Run them from `backend`:
+50 automated tests cover login and roles, access control, safe approval (no double-send, blocked phone numbers and
+links, input limits), weekly data entry and re-scoring, admin user and student management, the messages lifecycle,
+WhatsApp delivery (with a fake sender), upgrading an older database, the AI guardrails, the audit log and the model. Run them from `backend`:
 `.venv\Scripts\python -m pytest -q`. They use a throwaway database and never touch the demo data.
 
 ## Known limitations (honest list)
 
 - All data is synthetic. The model has not been validated on real school data.
-- WhatsApp and SMS sending is simulated. Nothing leaves the machine.
+- WhatsApp sending is simulated by default, so the seeded demo parents (placeholder numbers) never receive anything.
+  Real delivery needs your own Twilio account (see below) and has not been tested end to end with a live phone
+  by the authors of this prototype; it is covered by automated tests with a fake sender.
 - Voice uses the browser's built-in text-to-speech. It needs a voice for the language on the device; Gujarati voices
   are not available everywhere.
 - Gujarati and Hindi text were written for the template engine and should be reviewed by a native speaker before

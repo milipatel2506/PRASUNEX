@@ -137,6 +137,16 @@ function Login({ onLogin }) {
   )
 }
 
+function LangSwitch({ lang, onPick, disabled }) {
+  return (
+    <div className="langs" role="group" aria-label="Message language">
+      {Object.keys(LANG).map((l) => (
+        <button key={l} lang={l} aria-pressed={lang === l} className={lang === l ? 'on' : ''} disabled={disabled} onClick={() => onPick(l)}>{LANG[l]}</button>
+      ))}
+    </div>
+  )
+}
+
 /* ---------- parent contact + remove student ---------- */
 function ContactCard({ d, sid, reload, onChanged }) {
   const s = d.student
@@ -144,28 +154,38 @@ function ContactCard({ d, sid, reload, onChanged }) {
   const [f, setF] = useState({ parent_name: s.parent_name, parent_phone: s.demo_number ? '' : s.parent_phone, parent_language: s.parent_language })
   const [err, setErr] = useState('')
   const [ok, setOk] = useState('')
+  const [busy, setBusy] = useState(false)
+  const openEdit = () => {
+    setF({ parent_name: s.parent_name, parent_phone: s.demo_number ? '' : s.parent_phone, parent_language: s.parent_language })
+    setErr(''); setOk(''); setOpen(true)
+  }
   const save = async (e) => {
-    e.preventDefault(); setErr(''); setOk('')
+    e.preventDefault()
+    if (busy) return
+    setBusy(true); setErr(''); setOk('')
     try {
       await api(`/students/${sid}/contact`, { method: 'PATCH', body: f })
       await reload(); setOpen(false); setOk('Parent contact saved.')
     } catch (x) { setErr(x.message) }
+    setBusy(false)
   }
   const remove = async () => {
+    if (busy) return
     if (!window.confirm(`Remove ${s.name} from class ${s.cls}? Their weekly data, plans and messages are deleted. This cannot be undone.`)) return
-    try { await api('/students/' + sid, { method: 'DELETE' }); onChanged(true) } catch (x) { setErr(x.message) }
+    setBusy(true)
+    try { await api('/students/' + sid, { method: 'DELETE' }); onChanged(true) } catch (x) { setErr(x.message); setBusy(false) }
   }
   return (
     <section className="panel">
       <div className="plan-head">
         <h3>Parent contact</h3>
         {d.can_edit && !open && <div className="row" style={{ gap: 8 }}>
-          <button className="btn alt" onClick={() => setOpen(true)}>{s.demo_number ? 'Add WhatsApp number' : 'Edit'}</button>
-          <button className="btn alt" onClick={remove}>Remove student</button>
+          <button className="btn alt" onClick={openEdit}>{s.demo_number ? 'Add WhatsApp number' : 'Edit contact'}</button>
+          <button className="btn danger" disabled={busy} onClick={remove}>Remove student</button>
         </div>}
       </div>
       {err && <div className="error" role="alert">{err}</div>}
-      {ok && <div className="ok">{ok}</div>}
+      <div role="status">{ok && <div className="ok">{ok}</div>}</div>
       {!open ? (
         <div className="meta">
           <span>Parent <b>{s.parent_name}</b></span>
@@ -179,7 +199,7 @@ function ContactCard({ d, sid, reload, onChanged }) {
             <label>Parent WhatsApp number<input autoFocus placeholder="+91 98765 43210" value={f.parent_phone} onChange={(e) => setF({ ...f, parent_phone: e.target.value })} /></label>
           </div>
           <label>Message language<select value={f.parent_language} onChange={(e) => setF({ ...f, parent_language: e.target.value })}>{Object.entries(LANG_NAME).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select></label>
-          <div className="row" style={{ gap: 8 }}><button className="btn" type="submit">Save</button><button className="btn alt" type="button" onClick={() => setOpen(false)}>Cancel</button></div>
+          <div className="row" style={{ gap: 8 }}><button className="btn" type="submit" disabled={busy}>{busy ? "Saving..." : "Save"}</button><button className="btn alt" type="button" onClick={() => setOpen(false)}>Cancel</button></div>
         </form>
       )}
       {s.demo_number && <p className="muted small" style={{ marginBottom: 0 }}>No real number saved, so messages stay in the simulated outbox. Add the parent's number to send on WhatsApp.</p>}
@@ -206,6 +226,7 @@ function StudentPanel({ sid, onChanged }) {
     setMsg(latest ? latest.message : '')
     setErr(''); setVoiceNote('')
   }
+  const refresh = async () => setD(await api('/students/' + sid))  // contact changes keep any unsaved plan edits
   useEffect(() => { load().catch((e) => setErr(e.message)) }, [sid])
   if (!d) return <div className="panel" role="status">{err || 'Loading...'}</div>
 
@@ -221,9 +242,10 @@ function StudentPanel({ sid, onChanged }) {
             </div>
             <Tag kind="unscored">Not scored</Tag>
           </div>
+          {err && <div className="error" role="alert">{err}</div>}
           <div className="note" style={{ margin: 0 }}>Not scored yet. SAARTHI needs at least 4 weeks of attendance, marks and homework for this student. Enter them on the Weekly data page, and the risk score will appear here.</div>
         </section>
-        <ContactCard d={d} sid={sid} reload={load} onChanged={onChanged} />
+        <ContactCard d={d} sid={sid} reload={refresh} onChanged={onChanged} />
       </div>
     )
   }
@@ -243,6 +265,8 @@ function StudentPanel({ sid, onChanged }) {
     })
   }
   const approve = () => wrap(async () => {
+    const to = live ? `${s.parent_name} (${s.parent_phone}) on WhatsApp` : `${s.parent_name} (simulated, nothing leaves this computer)`
+    if (!window.confirm(`Approve and send this message to ${to}? This cannot be undone.`)) return
     await api(`/plans/${plan.id}/approve`, { method: 'POST', body: { actions: plan.actions, message: msg, language: lang } })
     await load(); onChanged()
   })
@@ -253,14 +277,6 @@ function StudentPanel({ sid, onChanged }) {
     setVoiceNote(r === 'ok' ? '' : r === 'unsupported' ? 'Voice is not supported in this browser.' :
       `No ${LANG_NAME[lang]} voice is installed on this device. Try Chrome or Edge, or install the language voice in system settings.`)
   }
-  const LangSwitch = ({ onPick, disabled }) => (
-    <div className="langs" role="group" aria-label="Message language">
-      {Object.keys(LANG).map((l) => (
-        <button key={l} aria-pressed={lang === l} className={lang === l ? 'on' : ''} disabled={disabled} onClick={() => onPick(l)}>{LANG[l]}</button>
-      ))}
-    </div>
-  )
-
   return (
     <div className="stack">
       <section className="panel">
@@ -299,7 +315,7 @@ function StudentPanel({ sid, onChanged }) {
         </div>
       </section>
 
-      <ContactCard d={d} sid={sid} reload={load} onChanged={onChanged} />
+      <ContactCard d={d} sid={sid} reload={refresh} onChanged={onChanged} />
 
       <section className="panel">
         <div className="plan-head">
@@ -307,11 +323,12 @@ function StudentPanel({ sid, onChanged }) {
           {plan && <Tag kind={plan.status}>{plan.status === 'approved' ? 'Approved and sent' : 'Draft, needs your approval'}</Tag>}
         </div>
         {err && <div className="error" role="alert" style={{ margin: '0 0 12px' }}>{err}</div>}
-        {!plan && (
+        {!plan && !d.can_edit && <p className="muted" style={{ margin: 0 }}>Read-only view: only the class faculty or admin can create and send plans.</p>}
+        {!plan && d.can_edit && (
           <>
             <p className="muted" style={{ marginTop: 0 }}>SAARTHI drafts three practical actions and a parent message. You review and approve before anything is sent.</p>
             <div className="small muted">Message language</div>
-            <LangSwitch onPick={setLang} disabled={busy} />
+            <LangSwitch lang={lang} onPick={setLang} disabled={busy} />
             <div><button className="btn" disabled={busy} onClick={create}>{busy ? 'Drafting...' : 'Create action plan'}</button></div>
           </>
         )}
@@ -331,7 +348,7 @@ function StudentPanel({ sid, onChanged }) {
             </div>
             <div>
               <h4 className="sec">Message to parent</h4>
-              <LangSwitch onPick={switchLang} disabled={approved || busy} />
+              <LangSwitch lang={lang} onPick={switchLang} disabled={approved || busy} />
               <div className="phone">
                 <div className="bar2">{s.parent_name} | {live ? s.parent_phone + ' | WhatsApp' : 'WhatsApp (simulated)'}</div>
                 <div className="bubble">{msg}<div className="tick">{approved ? '✓ sent' : 'draft'}</div></div>
@@ -339,11 +356,11 @@ function StudentPanel({ sid, onChanged }) {
               {!approved && <textarea style={{ marginTop: 12, minHeight: 110 }} value={msg} onChange={(e) => setMsg(e.target.value)} aria-label="Edit message" />}
               <div className="row" style={{ marginTop: 12, flexWrap: 'wrap' }}>
                 <button className="btn alt" onClick={voice}><Volume2 size={16} aria-hidden="true" />Play voice</button>
-                {!approved && <button className="btn go" disabled={busy} onClick={approve}><Send size={16} aria-hidden="true" />{live ? 'Approve and send on WhatsApp' : 'Approve and send (simulated)'}</button>}
-                {!approved && <button className="btn alt" disabled={busy} onClick={create}><RefreshCw size={16} aria-hidden="true" />Redraft</button>}
+                {!approved && d.can_edit && <button className="btn go" disabled={busy} onClick={approve}><Send size={16} aria-hidden="true" />{live ? 'Approve and send on WhatsApp' : 'Approve and send (simulated)'}</button>}
+                {!approved && d.can_edit && <button className="btn alt" disabled={busy} onClick={create}><RefreshCw size={16} aria-hidden="true" />Redraft</button>}
               </div>
-              {voiceNote && <div className="flag">{voiceNote}</div>}
-              {approved && <div className="ok">Approved by {plan.approved_by} and sent to {s.parent_name} ({s.parent_phone}). Track delivery on the Messages page.</div>}
+              {voiceNote && <div className="flag" role="status">{voiceNote}</div>}
+              {approved && <div className="ok" role="status">Approved by {plan.approved_by}. {live ? `Sent to ${s.parent_name} (${s.parent_phone}).` : `Recorded in the simulated outbox for ${s.parent_name}; add a real WhatsApp number to send for real.`} Track delivery on the Messages page.</div>}
             </div>
           </div>
         )}
@@ -361,9 +378,9 @@ function StudentPanel({ sid, onChanged }) {
                   <td>{i.text}</td><td>{KIND[i.kind] || i.kind}</td>
                   <td>{i.outcome ? <Tag kind={i.outcome === 'improved' ? 'approved' : i.outcome === 'declined' ? 'high' : 'medium'}>{i.outcome.replace('_', ' ')}</Tag> :
                     <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
-                      <button className="btn alt" disabled={busy} onClick={() => setOutcome(i.id, 'improved')}>Improved</button>
-                      <button className="btn alt" disabled={busy} onClick={() => setOutcome(i.id, 'no_change')}>No change</button>
-                      <button className="btn alt" disabled={busy} onClick={() => setOutcome(i.id, 'declined')}>Declined</button>
+                      <button className="btn alt" disabled={busy || !d.can_edit} onClick={() => setOutcome(i.id, 'improved')}>Improved</button>
+                      <button className="btn alt" disabled={busy || !d.can_edit} onClick={() => setOutcome(i.id, 'no_change')}>No change</button>
+                      <button className="btn alt" disabled={busy || !d.can_edit} onClick={() => setOutcome(i.id, 'declined')}>Declined</button>
                     </div>}</td>
                 </tr>
               ))}
@@ -423,11 +440,11 @@ function Classes({ canEdit }) {
   const curRef = useRef(null)
   curRef.current = cur
 
-  const loadClasses = () => api('/classes').then((c) => { setCls(c); if (!curRef.current && c.length) setCur(c[0].cls) }).catch((e) => setErr(e.message))
+  const loadClasses = () => api('/classes').then((c) => { setErr(''); setCls(c); if ((!curRef.current || !c.some((x) => x.cls === curRef.current)) && c.length) setCur(c[0].cls) }).catch((e) => setErr(e.message))
   const loadList = () => {
     const c = cur
     if (!c) return
-    api('/students?cls=' + c).then((r) => { if (curRef.current === c) setList(r) }).catch((e) => setErr(e.message))
+    api('/students?cls=' + c).then((r) => { if (curRef.current === c) { setList(r); setErr('') } }).catch((e) => setErr(e.message))
   }
   useEffect(() => { loadClasses() }, [])
   useEffect(() => { setSel(null); loadList() }, [cur])
@@ -456,7 +473,7 @@ function Classes({ canEdit }) {
           </div>
           <div className="list">
             {shown.map((s) => (
-              <button key={s.id} aria-current={sel === s.id} className={'student' + (sel === s.id ? ' on' : '')} onClick={() => setSel(s.id)}>
+              <button key={s.id} aria-current={sel === s.id || undefined} className={'student' + (sel === s.id ? ' on' : '')} onClick={() => setSel(s.id)}>
                 <div className="l1">
                   <span className="name">{s.name}</span>
                   <span className="score"><span className="n">{s.tier === 'unscored' ? '' : pct(s.risk)}</span><Tag kind={s.tier}>{TIER[s.tier]}</Tag></span>
@@ -468,7 +485,7 @@ function Classes({ canEdit }) {
                 <div className="riskbar"><i style={{ width: s.risk * 100 + '%', background: TIER_BAR[s.tier] }} /></div>
               </button>
             ))}
-            {!shown.length && <div className="empty">No students flagged in this class.</div>}
+            {!shown.length && <div className="empty">{all ? 'This class has no students yet.' : 'No students flagged in this class. Use Show all students to see everyone.'}</div>}
           </div>
         </div>
         <div>{sel ? <StudentPanel key={sel} sid={sel} onChanged={(removed) => { if (removed === true) setSel(null); loadClasses(); loadList() }} /> :
@@ -619,11 +636,11 @@ export default function App() {
     try { if (window.speechSynthesis) window.speechSynthesis.getVoices() } catch { /* voices load lazily */ }
     const out = () => setUser(null)
     window.addEventListener('saarthi-logout', out)
-    if (hasToken()) api('/me').then(setUser).catch(() => setToken('')).finally(() => setReady(true))
+    if (hasToken()) api('/me').then(setUser).catch((e) => { if (e.status === 401) setToken('') }).finally(() => setReady(true))
     else setReady(true)
     return () => window.removeEventListener('saarthi-logout', out)
   }, [])
-  if (!ready) return null
+  if (!ready) return <div className="page" role="status">Loading...</div>
   if (!user) return <Login onLogin={(u) => { setUser(u); setTab('classes') }} />
 
   const role = user.role
@@ -645,6 +662,7 @@ export default function App() {
   const cur = T[order.includes(tab) ? tab : 'classes']
   return (
     <div className="app">
+      <a href="#main" className="skip">Skip to content</a>
       <aside className="side">
         <div className="brand">SAARTHI<small>Student Success Copilot</small></div>
         <nav className="nav" aria-label="Main">
@@ -662,7 +680,7 @@ export default function App() {
           <button className="signout" onClick={() => { setToken(''); setUser(null) }}><LogOut size={16} aria-hidden="true" />Sign out</button>
         </div>
       </aside>
-      <div className="main">
+      <main className="main" id="main">
         <PageHead title={cur[2]} sub={cur[3]} />
         {tab === 'classes' && <Classes canEdit={role !== 'principal'} />}
         {tab === 'weekly' && <WeeklyPage />}
@@ -673,7 +691,7 @@ export default function App() {
         {tab === 'settings' && <SettingsPage />}
         {tab === 'audit' && <Audit />}
         {tab === 'model' && <ModelPage />}
-      </div>
+      </main>
     </div>
   )
 }

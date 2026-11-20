@@ -27,9 +27,22 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="SAARTHI", version="1.0", lifespan=lifespan)
+app = FastAPI(title="SAARTHI", version="1.0", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
-                   allow_methods=["*"], allow_headers=["*"])
+                   allow_methods=["GET", "POST", "PATCH", "DELETE"], allow_headers=["Authorization", "Content-Type"])
+
+
+@app.middleware("http")
+async def security_headers(request, call_next):
+    resp = await call_next(request)
+    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+    resp.headers.setdefault("X-Frame-Options", "DENY")
+    resp.headers.setdefault("Referrer-Policy", "no-referrer")
+    resp.headers.setdefault("Content-Security-Policy",
+                            "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'")
+    if request.url.path.startswith("/api/"):
+        resp.headers["Cache-Control"] = "no-store"
+    return resp
 
 
 # ---------- helpers ----------------------------------------------------------------
@@ -57,7 +70,12 @@ def user_dep(authorization: str | None = Header(default=None)) -> dict:
     if not user or user["exp"] < time.time():
         TOKENS.pop(token, None)
         raise HTTPException(401, "Please sign in")
-    return {**user, "token": token}
+    rows = q("SELECT name, role, classes, active FROM users WHERE username=?", (user["username"],))
+    if not rows or rows[0]["active"] == 0:  # removed or disabled since sign-in
+        TOKENS.pop(token, None)
+        raise HTTPException(401, "Please sign in")
+    r = rows[0]  # role and classes come from the database, so admin changes apply immediately
+    return {**user, "name": r["name"], "role": r["role"], "classes": json.loads(r["classes"]), "token": token}
 
 
 OVERSIGHT = ("principal", "admin")  # roles that see every class
@@ -76,12 +94,18 @@ def my_classes(user: dict) -> list[str]:
     return all_classes() if user["role"] in OVERSIGHT else user["classes"]
 
 
-def get_student(sid: int, user: dict) -> dict:
+def can_write(user: dict, cls: str) -> bool:
+    return user["role"] == "admin" or (user["role"] == "teacher" and cls in user["classes"])
+
+
+def get_student(sid: int, user: dict, write: bool = False) -> dict:
     rows = q("SELECT * FROM students WHERE id=?", (sid,))
     if not rows:
         raise HTTPException(404, "Student not found")
     if not can_see(user, rows[0]["cls"]):
         raise HTTPException(403, "This student is not in your classes")
+    if write and not can_write(user, rows[0]["cls"]):
+        raise HTTPException(403, "Read-only access: only the class faculty or admin can do this")
     rows[0].pop("gender", None)  # not needed by the app, so not exposed
     return rows[0]
 
@@ -113,6 +137,8 @@ TOKEN_TTL = 8 * 3600
 @app.post("/api/login")
 def login(body: Login):
     name = body.username.strip().lower()
+    for k in [k for k, v in FAILS.items() if not v or v[-1] < time.time() - 60]:
+        FAILS.pop(k, None)  # forget old failures so the table cannot grow forever
     recent = [t for t in FAILS.get(name, []) if t > time.time() - 60]
     if len(recent) >= 5:
         raise HTTPException(429, "Too many attempts. Try again in a minute.")
@@ -181,7 +207,7 @@ def student_detail(sid: int, user: dict = Depends(user_dep)):
         w["marks_avg"] = sum(w[k] for k in SUBJECT_LABEL) / len(SUBJECT_LABEL)
     plans = [plan_out(p) for p in q("SELECT * FROM plans WHERE student_id=? ORDER BY id DESC", (sid,))]
     ints = q("SELECT * FROM interventions WHERE student_id=? ORDER BY id DESC", (sid,))
-    can_edit = user["role"] == "admin" or (user["role"] == "teacher" and s["cls"] in user["classes"])
+    can_edit = can_write(user, s["cls"])
     phone = s.get("parent_phone") if can_edit else whatsapp.mask(s.get("parent_phone"))  # principal sees it masked
     return {"student": {**s, "parent_phone": phone, "demo_number": whatsapp.is_demo(s.get("parent_phone"))},
             "can_edit": can_edit, "whatsapp_live": whatsapp.configured(),
@@ -203,7 +229,7 @@ def _log(student: dict, res: dict, plan_id: int) -> None:
 
 @app.post("/api/students/{sid}/plan")
 def make_plan(sid: int, body: PlanReq, user: dict = Depends(user_dep)):
-    s = get_student(sid, user)
+    s = get_student(sid, user, write=True)
     lang = body.language or s["parent_language"]
     if lang not in LANGS:
         raise HTTPException(400, "Unsupported language")
@@ -227,14 +253,24 @@ def retranslate(pid: int, body: MsgReq, user: dict = Depends(user_dep)):
     plan = q("SELECT * FROM plans WHERE id=?", (pid,))
     if not plan:
         raise HTTPException(404, "Plan not found")
-    s = get_student(plan[0]["student_id"], user)
+    s = get_student(plan[0]["student_id"], user, write=True)
     if plan[0]["status"] == "approved":
         raise HTTPException(409, "Approved plans cannot be changed")
     if body.language not in LANGS:
         raise HTTPException(400, "Unsupported language")
-    res = actions.translate_message(s, get_risk(s["id"]), body.language)
-    run("UPDATE plans SET message=?, language=?, flags=? WHERE id=?",
-        (res["message"], body.language, json.dumps(res["flags"]), pid))
+    risk = get_risk(s["id"])
+    if risk is None:
+        raise HTTPException(409, "Not scored yet")
+    res = actions.translate_message(s, risk, body.language)
+    con = db.connect()
+    try:
+        cur = con.execute("UPDATE plans SET message=?, language=?, flags=? WHERE id=? AND status!='approved'",
+                          (res["message"], body.language, json.dumps(res["flags"]), pid))
+        con.commit()
+    finally:
+        con.close()
+    if cur.rowcount == 0:
+        raise HTTPException(409, "Approved plans cannot be changed")
     _log(s, {**res, "actions": json.loads(plan[0]["actions"])}, pid)
     return plan_out(q("SELECT * FROM plans WHERE id=?", (pid,))[0])
 
@@ -256,7 +292,7 @@ def approve(pid: int, body: ApproveReq, user: dict = Depends(user_dep)):
     if not plan:
         raise HTTPException(404, "Plan not found")
     p = plan[0]
-    s = get_student(p["student_id"], user)
+    s = get_student(p["student_id"], user, write=True)
     if p["status"] == "approved":
         raise HTTPException(409, "Already approved")
     if body.language not in LANGS:
@@ -297,7 +333,10 @@ def approve(pid: int, body: ApproveReq, user: dict = Depends(user_dep)):
     finally:
         con.close()
     from .extra import deliver_message  # imported here: extra.py registers its routes on this app
-    deliver_message(mid)
+    try:
+        deliver_message(mid)
+    except Exception as e:  # the plan is already approved; record the failure instead of returning a 500
+        run("UPDATE messages SET status='failed', error=? WHERE id=?", (str(e)[:200], mid))
     out = plan_out(q("SELECT * FROM plans WHERE id=?", (pid,))[0])
     out["message_id"] = mid
     return out
@@ -314,7 +353,7 @@ def outcome(iid: int, body: OutcomeReq, user: dict = Depends(user_dep)):
     row = q("SELECT * FROM interventions WHERE id=?", (iid,))
     if not row or row[0]["student_id"] is None:
         raise HTTPException(404, "Intervention not found")
-    get_student(row[0]["student_id"], user)
+    get_student(row[0]["student_id"], user, write=True)
     run("UPDATE interventions SET outcome=? WHERE id=?", (body.outcome, iid))
     return {"ok": True}
 

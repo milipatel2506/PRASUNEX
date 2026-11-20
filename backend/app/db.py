@@ -36,6 +36,12 @@ CREATE TABLE IF NOT EXISTS messages(id INTEGER PRIMARY KEY, plan_id INTEGER, stu
   language TEXT, body TEXT, status TEXT, ts TEXT);
 CREATE TABLE IF NOT EXISTS ai_log(id INTEGER PRIMARY KEY, ts TEXT, student_ref TEXT, provider TEXT, language TEXT,
   input TEXT, output TEXT, flags TEXT, approved_by TEXT, plan_id INTEGER);
+CREATE TABLE IF NOT EXISTS activity(id INTEGER PRIMARY KEY, ts TEXT, actor TEXT, action TEXT, detail TEXT);
+CREATE INDEX IF NOT EXISTS ix_students_cls ON students(cls);
+CREATE INDEX IF NOT EXISTS ix_plans_student ON plans(student_id);
+CREATE INDEX IF NOT EXISTS ix_interventions_student ON interventions(student_id);
+CREATE INDEX IF NOT EXISTS ix_messages_student ON messages(student_id);
+CREATE INDEX IF NOT EXISTS ix_ai_log_plan ON ai_log(plan_id);
 """
 
 USERS = [
@@ -78,8 +84,14 @@ def check_pw(pw: str, stored: str) -> bool:
 
 def connect() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    con = sqlite3.connect(DB_PATH, check_same_thread=False)
+    con = sqlite3.connect(DB_PATH, timeout=10)
     con.row_factory = sqlite3.Row
+    con.execute("PRAGMA busy_timeout=10000")
+    try:
+        con.execute("PRAGMA journal_mode=WAL")  # readers no longer block the writer
+        con.execute("PRAGMA synchronous=NORMAL")
+    except sqlite3.OperationalError:
+        pass
     return con
 
 
@@ -89,6 +101,10 @@ def migrate(con: sqlite3.Connection) -> None:
         for col, decl in cols.items():
             if col not in have:
                 con.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+    try:  # one roll number per class; skipped (not fatal) if an old database already has duplicates
+        con.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_students_cls_roll ON students(cls, roll)")
+    except sqlite3.IntegrityError:
+        pass
     con.execute("UPDATE users SET active=1 WHERE active IS NULL")
     con.execute("UPDATE students SET parent_name='Parent of ' || first_en WHERE parent_name IS NULL")
     con.execute("UPDATE students SET parent_phone='+91 00000 ' || printf('%05d', id) WHERE parent_phone IS NULL")

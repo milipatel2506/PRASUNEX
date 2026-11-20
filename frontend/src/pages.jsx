@@ -95,12 +95,22 @@ export function WeeklyPage() {
   const [err, setErr] = useState('')
   const [done, setDone] = useState('')
   const [busy, setBusy] = useState(false)
+  const curCls = useRef('')
   useEffect(() => { api('/classes').then((c) => { setClasses(c); if (c[0]) setCls(c[0].cls) }).catch((e) => setErr(e.message)) }, [])
-  const load = () => cls && api('/weekly?cls=' + cls).then((r) => setRows(r.map((s) => ({
-    id: s.id, name: s.name, roll: s.roll, week: s.next_week,
-    v: { ...s.last, attendance: Math.round(s.last.attendance * 100), homework: Math.round(s.last.homework * 100) },
-  })))).catch((e) => setErr(e.message))
-  useEffect(() => { setDone(''); setErr(''); load() }, [cls])
+  const blank = { attendance: 90, homework: 80, incidents: 0, maths: 60, science: 60, english: 60, social: 60, language: 60 }
+  const load = () => {
+    const c = cls
+    if (!c) return Promise.resolve()
+    return api('/weekly?cls=' + c).then((r) => {
+      if (curRefIs(c)) setRows(r.map((s) => {
+        const last = s.last || blank  // a brand-new student has no earlier week to copy from
+        return { id: s.id, name: s.name, roll: s.roll, week: s.next_week,
+          v: { ...last, attendance: s.last ? Math.round(last.attendance * 100) : last.attendance, homework: s.last ? Math.round(last.homework * 100) : last.homework } }
+      }))
+    }).catch((e) => setErr(e.message))
+  }
+  const curRefIs = (c) => curCls.current === c
+  useEffect(() => { curCls.current = cls; setRows([]); setDone(''); setErr(''); load() }, [cls])
   const set = (id, k, val) => setRows((rs) => rs.map((r) => (r.id === id ? { ...r, v: { ...r.v, [k]: val } } : r)))
 
   const save = async () => {

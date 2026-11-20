@@ -12,7 +12,7 @@ from fastapi import Depends, HTTPException
 from pydantic import BaseModel, Field, ValidationError
 
 from . import actions, db, scoring, whatsapp
-from .main import TOKENS, all_classes, app, can_see, q, run, user_dep
+from .main import TOKENS, all_classes, app, can_see, can_write, q, run, user_dep
 
 SUBJECTS = ["maths", "science", "english", "social", "language"]
 
@@ -82,6 +82,8 @@ def list_messages(user: dict = Depends(user_dep)):
 def mark_read(mid: int, user: dict = Depends(user_dep)):
     """Demo only: simulates the parent opening the message on their phone."""
     m = _message(mid, user)
+    if not can_write(user, m["cls"]):
+        raise HTTPException(403, "Read-only access")
     if m["provider"] != "simulated":
         raise HTTPException(409, "Real WhatsApp messages report their own read status. Use Refresh status.")
     stamp = db.now()
@@ -298,7 +300,10 @@ class ContactPatch(BaseModel):
 @app.post("/api/students")
 def add_student(body: StudentIn, user: dict = Depends(user_dep)):
     _writer(user, body.cls)
-    return {"id": _add_student(body)}
+    sid = _add_student(body)
+    run("INSERT INTO activity(ts,actor,action,detail) VALUES(?,?,?,?)",
+        (db.now(), user["name"], "student_added", f"{body.name} (class {body.cls}, id {sid})"))
+    return {"id": sid}
 
 
 @app.patch("/api/students/{sid}/contact")
@@ -308,6 +313,11 @@ def update_contact(sid: int, body: ContactPatch, user: dict = Depends(user_dep))
         raise HTTPException(404, "Student not found")
     _writer(user, rows[0]["cls"])
     _check_phone(body.parent_phone)
+    if body.parent_phone and body.parent_phone.strip():
+        old = q("SELECT parent_phone FROM students WHERE id=?", (sid,))[0]["parent_phone"]
+        run("INSERT INTO activity(ts,actor,action,detail) VALUES(?,?,?,?)",
+            (db.now(), user["name"], "parent_phone_changed",
+             f"student {sid}: {whatsapp.mask(old)} -> {whatsapp.mask(whatsapp.normalize(body.parent_phone))}"))
     if body.parent_name is not None:
         run("UPDATE students SET parent_name=? WHERE id=?", (body.parent_name.strip(), sid))
     if body.parent_phone is not None and body.parent_phone.strip():
@@ -320,13 +330,24 @@ def update_contact(sid: int, body: ContactPatch, user: dict = Depends(user_dep))
 @app.delete("/api/students/{sid}")
 def remove_student(sid: int, user: dict = Depends(user_dep)):
     """Permanently removes a student and all of their records (weekly data, risk, plans, messages)."""
-    rows = q("SELECT cls FROM students WHERE id=?", (sid,))
+    rows = q("SELECT cls, name FROM students WHERE id=?", (sid,))
     if not rows:
         raise HTTPException(404, "Student not found")
     _writer(user, rows[0]["cls"])
-    for t in ("weekly", "risk", "plans", "interventions", "messages"):
-        run(f"DELETE FROM {t} WHERE student_id=?", (sid,))
-    run("DELETE FROM students WHERE id=?", (sid,))
+    con = db.connect()
+    try:  # one transaction: either everything is removed or nothing is
+        con.execute("DELETE FROM ai_log WHERE plan_id IN (SELECT id FROM plans WHERE student_id=?)", (sid,))
+        for t in ("weekly", "risk", "plans", "interventions", "messages"):
+            con.execute(f"DELETE FROM {t} WHERE student_id=?", (sid,))
+        con.execute("DELETE FROM students WHERE id=?", (sid,))
+        con.execute("INSERT INTO activity(ts,actor,action,detail) VALUES(?,?,?,?)",
+                    (db.now(), user["name"], "student_removed", f"{rows[0]['name']} (class {rows[0]['cls']}, id {sid})"))
+        con.commit()
+    except Exception:
+        con.rollback()
+        raise
+    finally:
+        con.close()
     return {"ok": True}
 
 

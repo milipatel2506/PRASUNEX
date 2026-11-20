@@ -9,11 +9,16 @@ export function setToken(t) {
 }
 
 export async function api(path, opts = {}) {
-  const res = await fetch('/api' + path, {
-    method: opts.method || 'GET',
-    headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: 'Bearer ' + token } : {}) },
-    body: opts.body ? JSON.stringify(opts.body) : undefined,
-  })
+  let res
+  try {
+    res = await fetch('/api' + path, {
+      method: opts.method || 'GET',
+      headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: 'Bearer ' + token } : {}) },
+      body: opts.body ? JSON.stringify(opts.body) : undefined,
+    })
+  } catch {
+    throw new Error('Cannot reach the SAARTHI server. Check that run.bat is still open, then try again.')
+  }
   if (!res.ok) {
     if (res.status === 401 && token) { setToken(''); window.dispatchEvent(new Event('saarthi-logout')) }
     let msg = res.statusText
@@ -22,5 +27,6 @@ export async function api(path, opts = {}) {
     e.status = res.status
     throw e
   }
+  if (res.status === 204) return null
   return res.json()
 }

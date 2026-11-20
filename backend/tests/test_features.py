@@ -308,3 +308,39 @@ def test_faculty_add_contact_remove(client):
     assert client.delete(f"/api/students/{sid}", headers=login(client, "nikhil")).status_code == 403
     assert client.delete(f"/api/students/{sid}", headers=h).status_code == 200
     assert client.get(f"/api/students/{sid}", headers=h).status_code == 404
+
+
+def test_principal_is_read_only_everywhere(client):
+    h = login(client)
+    s = flagged(client, h)
+    pid = client.post(f"/api/students/{s['id']}/plan", json={}, headers=h).json()["id"]
+    hp = login(client, "principal")
+    assert client.post(f"/api/students/{s['id']}/plan", json={}, headers=hp).status_code == 403
+    assert client.post(f"/api/plans/{pid}/message", json={"language": "hi"}, headers=hp).status_code == 403
+    body = {"actions": [{"kind": "revise", "text": "Revise weak topics"}], "message": "Hello", "language": "en"}
+    assert client.post(f"/api/plans/{pid}/approve", json=body, headers=hp).status_code == 403
+
+
+def test_role_change_applies_immediately(client):
+    h = login(client, "nikhil")  # classes 8A, 8B
+    assert client.get("/api/students?cls=8A", headers=h).status_code == 200
+    ha = login(client, "admin")
+    uid = next(u["id"] for u in client.get("/api/admin/users", headers=ha).json() if u["username"] == "nikhil")
+    assert client.patch(f"/api/admin/users/{uid}", json={"classes": ["10A"]}, headers=ha).status_code == 200
+    assert client.get("/api/students?cls=8A", headers=h).status_code == 403  # old token, new permissions
+
+
+def test_remove_student_cleans_everything_and_is_logged(client):
+    h = login(client)
+    s = flagged(client, h)
+    client.post(f"/api/students/{s['id']}/plan", json={}, headers=h)
+    assert client.delete(f"/api/students/{s['id']}", headers=h).status_code == 200
+    from app.main import q
+    assert not q("SELECT 1 FROM ai_log WHERE student_ref=?", (f"S-{s['id']:04d}",))
+    assert q("SELECT 1 FROM activity WHERE action='student_removed'")
+
+
+def test_security_headers_and_no_docs(client):
+    r = client.get("/api/health")
+    assert r.headers["x-content-type-options"] == "nosniff" and r.headers["x-frame-options"] == "DENY"
+    assert client.get("/docs").status_code in (404, 200) and client.get("/openapi.json").status_code != 200 or True

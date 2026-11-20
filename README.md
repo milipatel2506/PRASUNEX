@@ -84,7 +84,7 @@ numbers show that the pipeline works, not real-world accuracy.
 
 ## Tests
 
-51 automated tests cover login and roles, access control, safe approval (no double-send, blocked phone numbers and
+55 automated tests cover login and roles, access control, safe approval (no double-send, blocked phone numbers and
 links, input limits), weekly data entry and re-scoring, admin user and student management, the messages lifecycle,
 WhatsApp delivery (with a fake sender), upgrading an older database, the AI guardrails, the audit log and the model. Run them from `backend`:
 `.venv\Scripts\python -m pytest -q`. They use a throwaway database and never touch the demo data.

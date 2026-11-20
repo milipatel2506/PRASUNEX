@@ -31,7 +31,8 @@ Reset the demo data at any time: `cd backend` then `.venv\Scripts\python -m app.
 | rina | Teacher | class 10A |
 | principal | Principal | whole school, AI audit log |
 
-The demo password is for the prototype only. A real deployment would use hashed passwords and SSO.
+The demo password is for the prototype only. Passwords are stored hashed, logins are rate limited and tokens expire;
+a real deployment would add single sign-on.
 
 ### Optional: use a real AI model
 
@@ -55,9 +56,16 @@ details. Its output passes guardrails; on any failure the template engine takes 
 
 ## Model results (synthetic held-out data)
 
-AUC 0.95. Flagging the top 20% of students gives about 74% precision and 84% recall, against 64% and 55% for a
-manual rule-of-thumb baseline. Gender is not a model input; a fairness check on flag rate and recall is shown on
-the Model and safety page.
+AUC 0.95. When the model and a manual rule-of-thumb flag the same share of students (about 15%), the model reaches
+84% precision and 72% recall, against 64% and 55% for the rule. Gender is not a model input; a fairness check on flag
+rate and recall is shown on the Model and safety page. The labels come from the same simulation as the data, so these
+numbers show that the pipeline works, not real-world accuracy.
+
+## Tests
+
+28 automated tests cover login and access control, safe approval (no double-send, blocked phone numbers and links,
+input limits), the AI guardrails, the anonymised audit log and the model. Run them from `backend`:
+`.venv\Scripts\python -m pytest -q`. They use a throwaway database and never touch the demo data.
 
 ## Known limitations (honest list)
 
@@ -68,7 +76,8 @@ the Model and safety page.
 - Gujarati and Hindi text were written for the template engine and should be reviewed by a native speaker before
   real use.
 - The "which actions work best" chart mixes seeded last-term demo history with live outcomes.
-- Login tokens live in server memory and reset when the server restarts.
+- Login tokens live in server memory (8-hour expiry) and reset when the server restarts. Passwords are hashed, but
+  the demo accounts share one password and there is no single sign-on.
 - No real ERP connection yet.
 
 ## Future plans

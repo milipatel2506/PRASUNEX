@@ -1,11 +1,12 @@
 :root {
-  --navy: #14213d; --ink: #1a1a2e; --muted: #6b7690; --bg: #f3f5fa; --card: #ffffff; --line: #e3e7f0;
+  --navy: #14213d; --ink: #1a1a2e; --muted: #586079; --bg: #f3f5fa; --card: #ffffff; --line: #e3e7f0;
   --amber: #f4a100; --teal: #2a9d8f; --coral: #e76f51; --blue: #4361ee; --green: #06a77d;
   --radius: 14px;
 }
 * { box-sizing: border-box; }
 body { margin: 0; font-family: 'Segoe UI', Calibri, system-ui, sans-serif; background: var(--bg); color: var(--ink); }
 button { font: inherit; cursor: pointer; }
+button:focus-visible, textarea:focus-visible, input:focus-visible { outline: 3px solid var(--blue); outline-offset: 2px; }
 h1, h2, h3 { margin: 0; color: var(--navy); }
 .serif { font-family: Cambria, Georgia, serif; }
 
@@ -48,7 +49,7 @@ h1, h2, h3 { margin: 0; color: var(--navy); }
 .tab b { color: var(--navy); }
 .tab .counts { font-size: 12px; margin-top: 2px; }
 .pill { display: inline-block; white-space: nowrap; padding: 2px 9px; border-radius: 999px; font-size: 12px; font-weight: 700; color: #fff; }
-.pill.high { background: var(--coral); } .pill.medium { background: var(--amber); } .pill.low { background: var(--teal); }
+.pill.high { background: #c9502f; } .pill.medium { background: var(--amber); color: var(--ink); } .pill.low { background: #1f7f74; }
 .pill.draft { background: var(--blue); } .pill.approved { background: var(--green); }
 .toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
 .student { display: block; width: 100%; text-align: left; background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; margin-bottom: 8px; }
@@ -91,7 +92,7 @@ textarea { min-height: 220px; resize: vertical; line-height: 1.5; }
 .phone { background: #e5ddd5; border-radius: 22px; padding: 12px; border: 6px solid #1c1c28; max-width: 330px; }
 .phone .bar2 { background: #075e54; color: #fff; padding: 8px 12px; border-radius: 10px; font-size: 13px; margin-bottom: 10px; }
 .bubble { background: #dcf8c6; border-radius: 10px; padding: 10px 12px; font-size: 13.5px; white-space: pre-wrap; line-height: 1.45; box-shadow: 0 1px 1px rgba(0,0,0,.12); }
-.bubble .tick { text-align: right; color: #4fc3f7; font-size: 12px; margin-top: 4px; }
+.bubble .tick { text-align: right; color: #1b6f9a; font-size: 12px; margin-top: 4px; }
 .flag { background: #fff6e0; color: #8a5a00; border-radius: 8px; padding: 6px 10px; font-size: 13px; margin-top: 8px; }
 .ok { background: #e6f7f1; color: #04684c; border-radius: 8px; padding: 8px 12px; font-size: 14px; margin-top: 8px; }
 

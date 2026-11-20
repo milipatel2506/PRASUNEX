@@ -67,6 +67,7 @@ def train(n: int = 6000, seed: int = 7) -> dict:
     rule = ((Xte.att_last4 < 0.85) | (Xte.marks_last4 < 50) | (Xte.hw_last4 < 0.6)).to_numpy()
     rule_prec = float(yte[rule].mean()) if rule.any() else 0.0
     rule_rec = float(yte[rule].sum() / max(1, yte.sum()))
+    eq_prec, eq_rec = _topk_metrics(yte, p, float(rule.mean()) or 0.2)  # model at the SAME flag share as the rule
 
     top = p >= np.quantile(p, 0.8)
     fairness = {g: {"flag_rate": float(top[gte == g].mean()),
@@ -84,6 +85,8 @@ def train(n: int = 6000, seed: int = 7) -> dict:
             "precision_at_top20": prec,
             "recall_at_top20": rec,
             "rule_baseline": {"precision": rule_prec, "recall": rule_rec, "flag_share": float(rule.mean())},
+            "equal_flag": {"share": float(rule.mean()), "model_precision": eq_prec, "model_recall": eq_rec,
+                           "rule_precision": rule_prec, "rule_recall": rule_rec},
             "at_risk_rate": float(y.mean()),
             "train_students": int(cut), "test_students": int(n - cut),
             "fairness": fairness,
@@ -154,7 +157,8 @@ def score(X: pd.DataFrame) -> list[dict]:
         reasons = [{"key": k, "label": CATEGORY_LABEL[k], "impact": round(v / total, 3),
                     "evidence": _evidence(k, row)}
                    for k, v in sorted(pos.items(), key=lambda kv: -kv[1])[:3]]
-        out.append({"risk": float(p[i]), "tier": tier_for(float(p[i])), "reasons": reasons})
+        tier = tier_for(float(p[i]))
+        out.append({"risk": float(p[i]), "tier": tier, "reasons": reasons if tier != "low" else []})
     return out
 
 

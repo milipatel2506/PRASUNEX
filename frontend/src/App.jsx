@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react'
-import { api, setToken } from './api'
+import { Fragment, useEffect, useRef, useState } from 'react'
+import { api, hasToken, setToken } from './api'
 
 const LANG = { en: 'English', gu: 'ગુજરાતી', hi: 'हिन्दी' }
 const KIND = {
@@ -28,6 +28,7 @@ function speak(text, lang) {
 
 /* ---------- small chart pieces ---------- */
 function Spark({ label, values, fmt, color, lo, hi }) {
+  if (!values || values.length < 2) return null
   const W = 200, H = 54
   const min = lo ?? Math.min(...values), max = hi ?? Math.max(...values)
   const span = max - min || 1
@@ -76,7 +77,7 @@ function Login({ onLogin }) {
       <div className="login-box">
         <h2 className="serif">Demo sign-in</h2>
         <p className="muted">Choose a role. All data is synthetic. Teachers see only their own classes.</p>
-        {err && <div className="error">{err}</div>}
+        {err && <div className="error" role="alert">{err}</div>}
         <button className="demo-btn" onClick={() => go('hetal')}><b>Ms. Hetal Shah</b><span>Teacher, classes 9A and 9B</span></button>
         <button className="demo-btn" onClick={() => go('nikhil')}><b>Mr. Nikhil Desai</b><span>Teacher, classes 8A and 8B</span></button>
         <button className="demo-btn" onClick={() => go('rina')}><b>Ms. Rina Joshi</b><span>Teacher, class 10A</span></button>
@@ -116,16 +117,19 @@ function StudentPanel({ sid, onChanged }) {
     const p = await api(`/students/${sid}/plan`, { method: 'POST', body: { language: lang } })
     setPlan(p); setMsg(p.message)
   })
-  const switchLang = (l) => { setLang(l); if (plan && !approved) wrap(async () => {
-    const p = await api(`/plans/${plan.id}/message`, { method: 'POST', body: { language: l } })
-    setPlan(p); setMsg(p.message)
-  }) }
+  const switchLang = (l) => {
+    if (!plan || approved) { setLang(l); return }
+    wrap(async () => {
+      const p = await api(`/plans/${plan.id}/message`, { method: 'POST', body: { language: l } })
+      setLang(l); setPlan(p); setMsg(p.message)
+    })
+  }
   const approve = () => wrap(async () => {
-    const p = await api(`/plans/${plan.id}/approve`, { method: 'POST', body: { actions: plan.actions, message: msg, language: lang } })
-    setPlan(p); await load(); onChanged()
+    await api(`/plans/${plan.id}/approve`, { method: 'POST', body: { actions: plan.actions, message: msg, language: lang } })
+    await load(); onChanged()
   })
   const setOutcome = (id, outcome) => wrap(async () => { await api(`/interventions/${id}/outcome`, { method: 'POST', body: { outcome } }); await load() })
-  const editAction = (i, text) => setPlan({ ...plan, actions: plan.actions.map((a, j) => (j === i ? { ...a, text } : a)) })
+  const editAction = (i, text) => setPlan((p) => ({ ...p, actions: p.actions.map((a, j) => (j === i ? { ...a, text } : a)) }))
   const voice = () => {
     const r = speak(msg, lang)
     setVoiceNote(r === 'ok' ? '' : r === 'unsupported' ? 'Voice is not supported in this browser.' :
@@ -168,11 +172,11 @@ function StudentPanel({ sid, onChanged }) {
           <h3 style={{ margin: 0 }}>Action plan and parent message</h3>
           {plan && <span className={'pill ' + plan.status}>{plan.status === 'approved' ? 'APPROVED AND SENT' : 'DRAFT, NEEDS YOUR APPROVAL'}</span>}
         </div>
-        {err && <div className="error" style={{ marginBottom: 10 }}>{err}</div>}
+        {err && <div className="error" role="alert" style={{ marginBottom: 10 }}>{err}</div>}
         {!plan && (
           <>
             <p className="muted">SAARTHI drafts three practical actions and a parent message. You review and approve before anything is sent.</p>
-            <div className="langs">{Object.keys(LANG).map((l) => <button key={l} className={lang === l ? 'on' : ''} onClick={() => setLang(l)}>{LANG[l]}</button>)}</div>
+            <div className="langs">{Object.keys(LANG).map((l) => <button key={l} aria-pressed={lang === l} className={lang === l ? 'on' : ''} onClick={() => setLang(l)}>{LANG[l]}</button>)}</div>
             <button className="btn" disabled={busy} onClick={create}>{busy ? 'Drafting...' : 'Create action plan'}</button>
           </>
         )}
@@ -192,7 +196,7 @@ function StudentPanel({ sid, onChanged }) {
             </div>
             <div>
               <h3>Message to parent</h3>
-              <div className="langs">{Object.keys(LANG).map((l) => <button key={l} className={lang === l ? 'on' : ''} disabled={approved || busy} onClick={() => switchLang(l)}>{LANG[l]}</button>)}</div>
+              <div className="langs">{Object.keys(LANG).map((l) => <button key={l} aria-pressed={lang === l} className={lang === l ? 'on' : ''} disabled={approved || busy} onClick={() => switchLang(l)}>{LANG[l]}</button>)}</div>
               <div className="row" style={{ alignItems: 'flex-start' }}>
                 <div className="phone" style={{ flex: 1 }}>
                   <div className="bar2">Parent of {s.first_en} | WhatsApp (simulated)</div>
@@ -224,9 +228,9 @@ function StudentPanel({ sid, onChanged }) {
                   <td>{i.text}</td><td>{KIND[i.kind] || i.kind}</td>
                   <td>{i.outcome ? <span className={'pill ' + (i.outcome === 'improved' ? 'approved' : i.outcome === 'declined' ? 'high' : 'medium')}>{i.outcome.replace('_', ' ')}</span> :
                     <div className="row" style={{ gap: 6 }}>
-                      <button className="btn alt" onClick={() => setOutcome(i.id, 'improved')}>Improved</button>
-                      <button className="btn alt" onClick={() => setOutcome(i.id, 'no_change')}>No change</button>
-                      <button className="btn alt" onClick={() => setOutcome(i.id, 'declined')}>Declined</button>
+                      <button className="btn alt" disabled={busy} onClick={() => setOutcome(i.id, 'improved')}>Improved</button>
+                      <button className="btn alt" disabled={busy} onClick={() => setOutcome(i.id, 'no_change')}>No change</button>
+                      <button className="btn alt" disabled={busy} onClick={() => setOutcome(i.id, 'declined')}>Declined</button>
                     </div>}</td>
                 </tr>
               ))}
@@ -246,8 +250,15 @@ function Classes() {
   const [sel, setSel] = useState(null)
   const [all, setAll] = useState(false)
 
-  const loadClasses = () => api('/classes').then((c) => { setCls(c); if (!cur && c.length) setCur(c[0].cls) })
-  const loadList = () => cur && api('/students?cls=' + cur).then(setList)
+  const [err, setErr] = useState('')
+  const curRef = useRef(null)
+  curRef.current = cur
+  const loadClasses = () => api('/classes').then((c) => { setCls(c); if (!curRef.current && c.length) setCur(c[0].cls) }).catch((e) => setErr(e.message))
+  const loadList = () => {
+    const c = cur
+    if (!c) return
+    api('/students?cls=' + c).then((r) => { if (curRef.current === c) setList(r) }).catch((e) => setErr(e.message))
+  }
   useEffect(() => { loadClasses() }, [])
   useEffect(() => { setSel(null); loadList() }, [cur])
 
@@ -255,6 +266,7 @@ function Classes() {
   const shown = all ? list : flagged
   return (
     <div className="page">
+      {err && <div className="error" role="alert" style={{ marginBottom: 12 }}>{err}</div>}
       <div className="tabs">
         {cls.map((c) => (
           <button key={c.cls} className={'tab' + (cur === c.cls ? ' on' : '')} onClick={() => setCur(c.cls)}>
@@ -282,7 +294,7 @@ function Classes() {
           ))}
           {!shown.length && <div className="card muted">No students flagged in this class.</div>}
         </div>
-        <div>{sel ? <StudentPanel sid={sel} onChanged={() => { loadClasses(); loadList() }} /> :
+        <div>{sel ? <StudentPanel key={sel} sid={sel} onChanged={() => { loadClasses(); loadList() }} /> :
           <div className="card"><h3>Select a student</h3><p className="muted">Pick someone from the risk radar to see why they were flagged, and to create an action plan.</p></div>}</div>
       </div>
     </div>
@@ -292,8 +304,10 @@ function Classes() {
 /* ---------- principal ---------- */
 function Overview() {
   const [o, setO] = useState(null)
-  useEffect(() => { api('/principal/overview').then(setO) }, [])
-  if (!o) return <div className="page">Loading...</div>
+  const [err, setErr] = useState('')
+  useEffect(() => { api('/principal/overview').then(setO).catch((e) => setErr(e.message)) }, [])
+  if (err) return <div className="page"><div className="error" role="alert">{err}</div></div>
+  if (!o) return <div className="page" role="status">Loading...</div>
   const s = o.stats
   const rmax = Math.max(1, ...Object.values(o.reasons))
   const smax = Math.max(1, ...Object.values(o.weak_subjects))
@@ -310,7 +324,7 @@ function Overview() {
         <div className="card">
           <h3>Risk by class</h3>
           {o.by_class.map((c) => {
-            const t = c.high + c.medium + c.low
+            const t = c.high + c.medium + c.low || 1
             return (
               <div className="hbar" key={c.cls} style={{ gridTemplateColumns: '60px 1fr 90px' }}>
                 <span>{c.cls}</span>
@@ -341,23 +355,25 @@ function Overview() {
 function Audit() {
   const [rows, setRows] = useState([])
   const [open, setOpen] = useState(null)
-  useEffect(() => { api('/audit').then(setRows) }, [])
+  const [err, setErr] = useState('')
+  useEffect(() => { api('/audit').then(setRows).catch((e) => setErr(e.message)) }, [])
   return (
     <div className="page">
+      {err && <div className="error" role="alert" style={{ marginBottom: 12 }}>{err}</div>}
       <div className="note" style={{ marginBottom: 14 }}>Every AI output is logged with exactly what was sent to the AI and who approved it. Only an anonymous reference, grade, risk reasons and topics are ever sent. Names and contact details are never included.</div>
       <div className="card">
         <table>
           <thead><tr><th>Time</th><th>Student ref</th><th>Source</th><th>Language</th><th>Safety flags</th><th>Approved by</th><th></th></tr></thead>
           <tbody>
             {rows.map((r) => (
-              <>
-                <tr key={r.id}>
+              <Fragment key={r.id}>
+                <tr>
                   <td>{r.ts}</td><td>{r.student_ref}</td><td>{r.provider}</td><td>{LANG[r.language]}</td>
                   <td>{r.flags.length ? r.flags.join(', ') : 'none'}</td><td>{r.approved_by || 'pending'}</td>
                   <td><button className="btn alt" onClick={() => setOpen(open === r.id ? null : r.id)}>{open === r.id ? 'Hide' : 'Inspect'}</button></td>
                 </tr>
                 {open === r.id && <tr key={r.id + 'x'}><td colSpan="7"><b className="small">Sent to the AI</b><pre>{JSON.stringify(r.input, null, 2)}</pre></td></tr>}
-              </>
+              </Fragment>
             ))}
             {!rows.length && <tr><td colSpan="7" className="muted">No AI activity yet. Create an action plan as a teacher first.</td></tr>}
           </tbody>
@@ -370,19 +386,21 @@ function Audit() {
 /* ---------- model & safety ---------- */
 function ModelPage() {
   const [m, setM] = useState(null)
-  useEffect(() => { api('/model').then(setM) }, [])
-  if (!m) return <div className="page">Loading...</div>
+  const [err, setErr] = useState('')
+  useEffect(() => { api('/model').then(setM).catch((e) => setErr(e.message)) }, [])
+  if (err) return <div className="page"><div className="error" role="alert">{err}</div></div>
+  if (!m) return <div className="page" role="status">Loading...</div>
   const x = m.metrics
   const imax = Math.max(...Object.values(m.importance))
   return (
     <div className="page">
       <div className="note" style={{ marginBottom: 14 }}>
-        <b>Honest scope:</b> this prototype is trained and tested on realistic <b>synthetic</b> data. Real-school validation is the first pilot step. AI source right now: <b>{m.ai.note}</b>.
+        <b>Honest scope:</b> this prototype is trained and tested on realistic <b>synthetic</b> data. Scores are measured against labels from the same simulation, so they show the pipeline works, not real-world accuracy. Real-school validation is the first pilot step. AI source right now: <b>{m.ai.note}</b>.
       </div>
       <div className="stats">
         <div className="stat"><b>{x.auc.toFixed(2)}</b><span>AUC (ranking quality)</span></div>
-        <div className="stat"><b>{pct(x.precision_at_top20)}</b><span>precision, top 20% flagged</span></div>
-        <div className="stat"><b>{pct(x.recall_at_top20)}</b><span>recall, top 20% flagged</span></div>
+        <div className="stat"><b>{pct(x.equal_flag.model_precision)}</b><span>precision, flagging the same {pct(x.equal_flag.share)} of students</span></div>
+        <div className="stat"><b>{pct(x.equal_flag.model_recall)}</b><span>recall, same {pct(x.equal_flag.share)} flagged</span></div>
         <div className="stat"><b>{pct(x.rule_baseline.precision)}</b><span>precision of manual rule-of-thumb</span></div>
         <div className="stat"><b>{pct(x.rule_baseline.recall)}</b><span>recall of manual rule-of-thumb</span></div>
       </div>
@@ -419,7 +437,14 @@ export default function App() {
   const [ready, setReady] = useState(false)
   const [tab, setTab] = useState('classes')
 
-  useEffect(() => { api('/me').then(setUser).catch(() => setToken('')).finally(() => setReady(true)) }, [])
+  useEffect(() => {
+    try { if (window.speechSynthesis) window.speechSynthesis.getVoices() } catch { /* voices load lazily */ }
+    const out = () => setUser(null)
+    window.addEventListener('saarthi-logout', out)
+    if (hasToken()) api('/me').then(setUser).catch(() => setToken('')).finally(() => setReady(true))
+    else setReady(true)
+    return () => window.removeEventListener('saarthi-logout', out)
+  }, [])
   if (!ready) return null
   if (!user) return <Login onLogin={(u) => { setUser(u); setTab('classes') }} />
   const principal = user.role === 'principal'

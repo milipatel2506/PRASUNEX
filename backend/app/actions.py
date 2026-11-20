@@ -70,9 +70,9 @@ def check_message(text: str, lang: str) -> list[str]:
     flags = []
     low = text.lower()
     for w in BANNED:
-        if w in low:
+        if re.search(r"(?<![a-z])" + re.escape(w) + r"(?![a-z])", low):
             flags.append(f"banned_phrase:{w}")
-    if re.search(r"\b\d{10}\b|@\w+\.\w+", text):
+    if re.search(r"(?:\d[\s-]?){8,}", text) or re.search(r"@|https?://|www\.", low):
         flags.append("contains_contact_details")
     if len(text) > 1200:
         flags.append("too_long")
@@ -88,7 +88,8 @@ def check_message(text: str, lang: str) -> list[str]:
 def validate_plan(plan: dict, lang: str) -> list[str]:
     flags = []
     acts = plan.get("actions")
-    if not isinstance(acts, list) or len(acts) != 3 or not all(isinstance(a, dict) and a.get("text") for a in acts):
+    if (not isinstance(acts, list) or len(acts) != 3 or
+            not all(isinstance(a, dict) and isinstance(a.get("text"), str) and 0 < len(a["text"]) <= 300 for a in acts)):
         flags.append("bad_actions_schema")
     msg = plan.get("parent_message")
     if not isinstance(msg, str) or "{student_name}" not in msg:
@@ -101,7 +102,7 @@ def validate_plan(plan: dict, lang: str) -> list[str]:
 # ---------- LLM provider -----------------------------------------------------------
 def _llm_plan(ctx: dict, lang: str) -> dict:
     import anthropic  # imported lazily so the app runs without the package/key
-    client = anthropic.Anthropic()
+    client = anthropic.Anthropic(timeout=15, max_retries=1)
     system = (
         "You help a school teacher support a struggling student. You will receive anonymised data. "
         "Reply with ONLY a JSON object: {\"actions\":[{\"kind\":<one of " + json.dumps(KINDS) + ">,\"text\":<one short, "
@@ -109,7 +110,7 @@ def _llm_plan(ctx: dict, lang: str) -> dict:
         f"The parent_message must be written in {LANGS[lang]}, in simple, warm, respectful language, under 120 words, "
         "never blame the child or parent, avoid gendered wording, mention one thing the school will do and one thing "
         "the family can do, and use the literal placeholder {student_name} for the child's name.")
-    resp = client.messages.create(model=LLM_MODEL, max_tokens=1200, system=system,
+    resp = client.messages.create(model=LLM_MODEL, max_tokens=2500, system=system,
                                   messages=[{"role": "user", "content": json.dumps(ctx["llm_input"])}])
     raw = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text").strip()
     raw = re.sub(r"^```(?:json)?|```$", "", raw, flags=re.M).strip()
@@ -159,7 +160,7 @@ def generate_plan(student: dict, risk: dict, lang: str) -> dict:
         plan = {"actions": acts, "topics": topics,
                 "parent_message": _template_message(ctx, lang, "{student_name}")}
     plan["parent_message"] = plan["parent_message"].replace("{student_name}", name)
-    plan.setdefault("topics", [])
+    plan["topics"] = [t for t in (plan.get("topics") or []) if isinstance(t, str)][:3]
     flags = check_message(plan["parent_message"], lang)
     if fallback_reason:
         flags.append(fallback_reason)

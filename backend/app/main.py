@@ -2,13 +2,14 @@
 from __future__ import annotations
 import json
 import secrets
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from . import actions, db, model
 from .content import LANGS
@@ -51,9 +52,11 @@ def run(sql: str, args: tuple = ()) -> int:
 
 def user_dep(authorization: str | None = Header(default=None)) -> dict:
     token = (authorization or "").removeprefix("Bearer ").strip()
-    if token not in TOKENS:
+    user = TOKENS.get(token)
+    if not user or user["exp"] < time.time():
+        TOKENS.pop(token, None)
         raise HTTPException(401, "Please sign in")
-    return TOKENS[token]
+    return {**user, "token": token}
 
 
 def can_see(user: dict, cls: str) -> bool:
@@ -66,6 +69,7 @@ def get_student(sid: int, user: dict) -> dict:
         raise HTTPException(404, "Student not found")
     if not can_see(user, rows[0]["cls"]):
         raise HTTPException(403, "This student is not in your classes")
+    rows[0].pop("gender", None)  # not needed by the app, so not exposed
     return rows[0]
 
 
@@ -87,26 +91,42 @@ class Login(BaseModel):
     password: str
 
 
+FAILS: dict[str, list[float]] = {}
+TOKEN_TTL = 8 * 3600
+
+
 @app.post("/api/login")
 def login(body: Login):
-    rows = q("SELECT * FROM users WHERE username=? AND password=?", (body.username.strip().lower(), body.password))
-    if not rows:
+    name = body.username.strip().lower()
+    recent = [t for t in FAILS.get(name, []) if t > time.time() - 60]
+    if len(recent) >= 5:
+        raise HTTPException(429, "Too many attempts. Try again in a minute.")
+    rows = q("SELECT * FROM users WHERE username=?", (name,))
+    if not rows or not db.check_pw(body.password, rows[0]["password"]):
+        FAILS[name] = recent + [time.time()]
         raise HTTPException(401, "Wrong username or password")
+    FAILS.pop(name, None)
     u = rows[0]
     user = {"username": u["username"], "name": u["name"], "role": u["role"], "classes": json.loads(u["classes"])}
     token = secrets.token_urlsafe(24)
-    TOKENS[token] = user
+    TOKENS[token] = {**user, "exp": time.time() + TOKEN_TTL}
     return {"token": token, "user": user}
+
+
+@app.post("/api/logout")
+def logout(user: dict = Depends(user_dep)):
+    TOKENS.pop(user["token"], None)
+    return {"ok": True}
 
 
 @app.get("/api/me")
 def me(user: dict = Depends(user_dep)):
-    return user
+    return {k: user[k] for k in ("username", "name", "role", "classes")}
 
 
 @app.get("/api/health")
 def health():
-    return {"ok": True, "ai": actions.provider_info(), "languages": LANGS}
+    return {"ok": True, "languages": LANGS}
 
 
 # ---------- teacher: class + students ---------------------------------------------
@@ -125,7 +145,7 @@ def students(cls: str, user: dict = Depends(user_dep)):
     if not can_see(user, cls):
         raise HTTPException(403, "This class is not yours")
     rows = q("""SELECT s.id, s.name, s.cls, s.roll, s.parent_language, r.risk, r.tier, r.reasons,
-                (SELECT status FROM plans p WHERE p.student_id=s.id ORDER BY p.id DESC LIMIT 1) plan_status
+                (SELECT status FROM plans p WHERE p.student_id=s.id ORDER BY (p.status='approved') DESC, p.id DESC LIMIT 1) plan_status
                 FROM students s JOIN risk r ON r.student_id=s.id WHERE s.cls=? ORDER BY r.risk DESC""", (cls,))
     for r in rows:
         r["reasons"] = json.loads(r["reasons"])
@@ -182,6 +202,8 @@ def retranslate(pid: int, body: MsgReq, user: dict = Depends(user_dep)):
     if not plan:
         raise HTTPException(404, "Plan not found")
     s = get_student(plan[0]["student_id"], user)
+    if plan[0]["status"] == "approved":
+        raise HTTPException(409, "Approved plans cannot be changed")
     if body.language not in LANGS:
         raise HTTPException(400, "Unsupported language")
     res = actions.translate_message(s, get_risk(s["id"]), body.language)
@@ -191,9 +213,14 @@ def retranslate(pid: int, body: MsgReq, user: dict = Depends(user_dep)):
     return plan_out(q("SELECT * FROM plans WHERE id=?", (pid,))[0])
 
 
+class ActionIn(BaseModel):
+    kind: str
+    text: str = Field(min_length=1, max_length=300)
+
+
 class ApproveReq(BaseModel):
-    actions: list[dict]
-    message: str
+    actions: list[ActionIn] = Field(min_length=1, max_length=3)
+    message: str = Field(min_length=1, max_length=1500)
     language: str
 
 
@@ -206,17 +233,39 @@ def approve(pid: int, body: ApproveReq, user: dict = Depends(user_dep)):
     s = get_student(p["student_id"], user)
     if p["status"] == "approved":
         raise HTTPException(409, "Already approved")
+    if body.language not in LANGS:
+        raise HTTPException(400, "Unsupported language")
+    if any(a.kind not in actions.KINDS for a in body.actions):
+        raise HTTPException(400, "Unknown action type")
     flags = actions.check_message(body.message, body.language)
-    if flags:
-        raise HTTPException(422, f"Message blocked by safety check: {', '.join(flags)}")
-    run("UPDATE plans SET status='approved', actions=?, message=?, language=?, approved_by=?, approved_at=? WHERE id=?",
-        (json.dumps(body.actions), body.message, body.language, user["name"], db.now(), pid))
-    run("INSERT INTO messages(plan_id,student_id,channel,language,body,status,ts) VALUES(?,?,?,?,?,?,?)",
-        (pid, s["id"], "whatsapp (simulated)", body.language, body.message, "delivered (simulated)", db.now()))
     for a in body.actions:
-        run("INSERT INTO interventions(student_id,plan_id,kind,text,outcome,created_at,source) VALUES(?,?,?,?,NULL,?,?)",
-            (s["id"], pid, a.get("kind", "progress_check"), a.get("text", ""), db.now(), "live"))
-    run("UPDATE ai_log SET approved_by=? WHERE plan_id=?", (user["name"], pid))
+        flags += [f"action:{f}" for f in actions.check_message(a.text, "en")]
+    if flags:
+        raise HTTPException(422, f"Blocked by safety check: {', '.join(flags)}")
+    acts = [a.model_dump() for a in body.actions]
+    con = db.connect()
+    try:
+        # claim the plan atomically so a double-click cannot approve (and send) twice
+        cur = con.execute("UPDATE plans SET status='approved', actions=?, message=?, language=?, approved_by=?, "
+                          "approved_at=? WHERE id=? AND status!='approved'",
+                          (json.dumps(acts), body.message, body.language, user["name"], db.now(), pid))
+        if cur.rowcount == 0:
+            raise HTTPException(409, "Already approved")
+        con.execute("INSERT INTO messages(plan_id,student_id,channel,language,body,status,ts) VALUES(?,?,?,?,?,?,?)",
+                    (pid, s["id"], "whatsapp (simulated)", body.language, body.message, "delivered (simulated)", db.now()))
+        for a in acts:
+            con.execute("INSERT INTO interventions(student_id,plan_id,kind,text,outcome,created_at,source) "
+                        "VALUES(?,?,?,?,NULL,?,?)", (s["id"], pid, a["kind"], a["text"], db.now(), "live"))
+        final = json.dumps({"actions": acts, "message": body.message, "final_after_teacher_edit": True},
+                           ensure_ascii=False)
+        con.execute("UPDATE ai_log SET approved_by=?, output=? WHERE id=(SELECT MAX(id) FROM ai_log WHERE plan_id=?)",
+                    (user["name"], final, pid))
+        con.commit()
+    except Exception:
+        con.rollback()
+        raise
+    finally:
+        con.close()
     return plan_out(q("SELECT * FROM plans WHERE id=?", (pid,))[0])
 
 
@@ -256,7 +305,7 @@ def overview(user: dict = Depends(user_dep)):
         for x in json.loads(r["reasons"]):
             reasons[x["label"]] = reasons.get(x["label"], 0) + 1
         subj[SUBJECT_LABEL[r["weakest_subject"]]] = subj.get(SUBJECT_LABEL[r["weakest_subject"]], 0) + 1
-    eff = q("""SELECT kind, COUNT(*) n, SUM(outcome='improved') improved FROM interventions
+    eff = q("""SELECT kind, COUNT(*) n, SUM(outcome='improved') improved, SUM(source='live') live FROM interventions
                WHERE outcome IS NOT NULL GROUP BY kind""")
     for e in eff:
         e["rate"] = (e["improved"] or 0) / e["n"] if e["n"] else 0

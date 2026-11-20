@@ -1,6 +1,8 @@
 let token = ''
 try { token = sessionStorage.getItem('saarthi_token') || '' } catch { /* storage unavailable */ }
 
+export const hasToken = () => !!token
+
 export function setToken(t) {
   token = t || ''
   try { t ? sessionStorage.setItem('saarthi_token', t) : sessionStorage.removeItem('saarthi_token') } catch { /* ignore */ }
@@ -13,6 +15,7 @@ export async function api(path, opts = {}) {
     body: opts.body ? JSON.stringify(opts.body) : undefined,
   })
   if (!res.ok) {
+    if (res.status === 401 && token) { setToken(''); window.dispatchEvent(new Event('saarthi-logout')) }
     let msg = res.statusText
     try { const j = await res.json(); msg = typeof j.detail === 'string' ? j.detail : JSON.stringify(j.detail) } catch { /* not json */ }
     const e = new Error(msg)

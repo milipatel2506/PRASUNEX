@@ -1,6 +1,8 @@
 """SQLite storage + seeding of the synthetic demo school."""
 from __future__ import annotations
+import hashlib
 import json
+import secrets
 import sqlite3
 import time
 from pathlib import Path
@@ -51,6 +53,20 @@ def now() -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S")
 
 
+def hash_pw(pw: str) -> str:
+    salt = secrets.token_hex(8)
+    return salt + "$" + hashlib.pbkdf2_hmac("sha256", pw.encode(), salt.encode(), 100_000).hex()
+
+
+def check_pw(pw: str, stored: str) -> bool:
+    try:
+        salt, digest = stored.split("$", 1)
+    except ValueError:
+        return False
+    test = hashlib.pbkdf2_hmac("sha256", pw.encode(), salt.encode(), 100_000).hex()
+    return secrets.compare_digest(test, digest)
+
+
 def connect() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(DB_PATH, check_same_thread=False)
@@ -60,10 +76,12 @@ def connect() -> sqlite3.Connection:
 
 def init() -> None:
     con = connect()
-    con.executescript(SCHEMA)
-    if con.execute("SELECT COUNT(*) FROM students").fetchone()[0] == 0:
-        seed(con)
-    con.close()
+    try:
+        con.executescript(SCHEMA)
+        if con.execute("SELECT COUNT(*) FROM students").fetchone()[0] == 0:
+            seed(con)
+    finally:
+        con.close()
 
 
 def seed(con: sqlite3.Connection) -> None:
@@ -75,7 +93,7 @@ def seed(con: sqlite3.Connection) -> None:
 
     for u in USERS:
         con.execute("INSERT INTO users(username,password,name,role,classes) VALUES(?,?,?,?,?)",
-                    (u[0], u[1], u[2], u[3], json.dumps(u[4])))
+                    (u[0], hash_pw(u[1]), u[2], u[3], json.dumps(u[4])))
     used = set()
     langs = rng.choice(["gu", "hi", "en"], n, p=[0.5, 0.3, 0.2])
     for i in range(n):

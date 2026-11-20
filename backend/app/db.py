@@ -68,18 +68,32 @@ def now() -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S")
 
 
+PW_ITERS = 600_000  # current OWASP guidance for PBKDF2-SHA256; the count is stored with each hash so it can be raised later
+
+
 def hash_pw(pw: str) -> str:
-    salt = secrets.token_hex(8)
-    return salt + "$" + hashlib.pbkdf2_hmac("sha256", pw.encode(), salt.encode(), 100_000).hex()
+    salt = secrets.token_hex(16)
+    return f"pbkdf2${PW_ITERS}${salt}${hashlib.pbkdf2_hmac('sha256', pw.encode(), salt.encode(), PW_ITERS).hex()}"
 
 
 def check_pw(pw: str, stored: str) -> bool:
-    try:
-        salt, digest = stored.split("$", 1)
-    except ValueError:
+    parts = stored.split("$")
+    if len(parts) == 4 and parts[0] == "pbkdf2":  # current format: pbkdf2$iterations$salt$hash
+        try:
+            iters = int(parts[1])
+        except ValueError:
+            return False
+        salt, digest = parts[2], parts[3]
+    elif len(parts) == 2:  # older format: salt$hash at 100,000 iterations
+        iters, salt, digest = 100_000, parts[0], parts[1]
+    else:
         return False
-    test = hashlib.pbkdf2_hmac("sha256", pw.encode(), salt.encode(), 100_000).hex()
+    test = hashlib.pbkdf2_hmac("sha256", pw.encode(), salt.encode(), iters).hex()
     return secrets.compare_digest(test, digest)
+
+
+def needs_rehash(stored: str) -> bool:
+    return not stored.startswith(f"pbkdf2${PW_ITERS}$")
 
 
 def connect() -> sqlite3.Connection:

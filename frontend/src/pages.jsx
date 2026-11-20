@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Download, RefreshCw, Upload } from 'lucide-react'
 import { api } from './api'
+import { ask } from './dialog'
 
 export const ROLE = { teacher: 'Faculty', principal: 'Principal', admin: 'Admin' }
 const LANG = { en: 'English', gu: 'ગુજરાતી', hi: 'हिन्दी' }
@@ -21,8 +22,8 @@ export function MessagesPage() {
   const [sel, setSel] = useState(null)
   const [busy, setBusy] = useState(false)
   const load = () => api('/messages').then((r) => { setRows(r); setErr('') }).catch((e) => setErr(e.message))
-  useEffect(() => { load(); const t = setInterval(load, 3000); return () => clearInterval(t) }, [])
-  useEffect(() => { if (rows && rows.length && sel === null) setSel(rows[0].id) }, [rows])
+  useEffect(() => { load(); const t = setInterval(() => { if (!document.hidden) load() }, 3000); return () => clearInterval(t) }, [])
+  useEffect(() => { if (rows && rows.length && (sel === null || !rows.some((r) => r.id === sel))) setSel(rows[0].id) }, [rows])
   const m = rows && rows.find((r) => r.id === sel)
 
   const act = async (path) => {
@@ -38,13 +39,13 @@ export function MessagesPage() {
         <div className="panel"><h3>No messages yet</h3><p className="muted">When a teacher approves a parent message, it is sent and appears here with its delivery status.</p></div>
       ) : (
         <div className="split wide">
-          <section className="panel" style={{ padding: 0, overflow: 'auto' }}>
+          <section className="panel" style={{ padding: 0, overflow: "auto" }} tabIndex={0} role="region" aria-label="Data table">
             <table>
-              <thead><tr><th>Student</th><th>Parent</th><th>Language</th><th>Status</th><th>Sent</th></tr></thead>
+              <thead><tr><th scope="col">Student</th><th scope="col">Parent</th><th scope="col">Language</th><th scope="col">Status</th><th scope="col">Sent</th></tr></thead>
               <tbody>
                 {rows.map((r) => (
                   <tr key={r.id} className={r.id === sel ? 'sel' : ''}>
-                    <td><button className="linklike" aria-current={r.id === sel} onClick={() => setSel(r.id)}>{r.student_name}</button><div className="muted small">Class {r.cls}</div></td>
+                    <td><button className="linklike" aria-current={r.id === sel || undefined} aria-label={`Show message to the parent of ${r.student_name}`} onClick={() => setSel(r.id)}>{r.student_name}</button><div className="muted small">Class {r.cls}</div></td>
                     <td>{r.parent_name}<div className="muted small">{r.parent_phone}{r.demo_number ? ' (demo number)' : ''}</div></td>
                     <td>{LANG_NAME[r.language]}</td>
                     <td><Status s={r.status} /></td>
@@ -59,7 +60,7 @@ export function MessagesPage() {
               <h3 className="sec">Parent's phone ({m.provider === 'twilio' ? 'real WhatsApp' : 'simulated'})</h3>
               <div className="phone">
                 <div className="bar2">SAARTHI School | official account</div>
-                <div className="bubble">{m.body}<div className={'tick ' + m.status}>{m.sent_at && m.sent_at.slice(11, 16)} {TICKS[m.status] || ''}</div></div>
+                <div className="bubble" lang={m.language}>{m.body}<div className={'tick ' + m.status}>{m.sent_at && m.sent_at.slice(11, 16)} <span aria-hidden="true">{TICKS[m.status] || ''}</span><span className="sr-only">{STATUS[m.status]}</span></div></div>
               </div>
               <dl className="facts">
                 <dt>To</dt><dd>{m.parent_name} ({m.parent_phone})</dd>
@@ -122,7 +123,7 @@ export function WeeklyPage() {
     setBusy(true)
     try {
       const res = await api('/weekly', { method: 'POST', body: { cls, rows: rows.map((r) => ({
-        student_id: r.id, attendance: Number(r.v.attendance) / 100, homework: Number(r.v.homework) / 100, incidents: Math.round(Number(r.v.incidents)),
+        student_id: r.id, week: r.week, attendance: Number(r.v.attendance) / 100, homework: Number(r.v.homework) / 100, incidents: Math.round(Number(r.v.incidents)),
         maths: Number(r.v.maths), science: Number(r.v.science), english: Number(r.v.english), social: Number(r.v.social), language: Number(r.v.language) })) } })
       setDone(`Saved this week for ${res.saved} students. Risk scores were updated for ${res.scored} of them.`)
       await load()
@@ -136,9 +137,9 @@ export function WeeklyPage() {
       </div>
       <Err>{err}</Err><Done>{done}</Done>
       <p className="muted" style={{ marginTop: 0 }}>Enter this week's numbers for every student. The values start from last week, so you only change what is different. Saving updates each student's risk score straight away.</p>
-      <section className="panel" style={{ padding: 0, overflow: 'auto' }}>
+      <section className="panel" style={{ padding: 0, overflow: "auto" }} tabIndex={0} role="region" aria-label="Data table">
         <table className="entry">
-          <thead><tr><th>Roll</th><th>Student</th><th>Week</th>{FIELDS.map(([k, label]) => <th key={k}>{label}</th>)}</tr></thead>
+          <thead><tr><th scope="col">Roll</th><th scope="col">Student</th><th scope="col">Week</th>{FIELDS.map(([k, label]) => <th scope="col" key={k}>{label}</th>)}</tr></thead>
           <tbody>
             {rows.map((r) => (
               <tr key={r.id}>
@@ -199,7 +200,7 @@ export function AdminStudents() {
   const pick = (e) => {
     const f = e.target.files[0]
     if (!f) return
-    f.text().then((t) => { try { setCsv(parseCsv(t)) } catch { setErr('Could not read that file as CSV.') } })
+    f.text().then((t) => { try { setCsv(parseCsv(t.replace(/^\uFEFF/, ''))) } catch { setErr('Could not read that file as CSV.') } })
   }
   const doImport = () => run(async () => {
     const res = await api('/admin/students/import', { method: 'POST', body: { rows: csv } })
@@ -238,8 +239,9 @@ export function AdminStudents() {
           <p className="muted small" style={{ marginTop: 0 }}>Upload a CSV file with the columns name, cls, roll, parent_language, parent_name, parent_phone, first_gu, first_hi.</p>
           <a className="btn alt" href={'data:text/csv;charset=utf-8,' + encodeURIComponent(TEMPLATE)} download="students-template.csv"><Download size={16} aria-hidden="true" />Download template</a>
           <div style={{ marginTop: 14 }}><label className="small muted">Choose CSV file<input ref={file} type="file" accept=".csv,text/csv" onChange={pick} style={{ display: 'block', marginTop: 6 }} /></label></div>
-          {csv && (
-            <div style={{ marginTop: 14 }}>
+          {csv && csv.length === 0 && <div className="error" role="alert" style={{ marginTop: 14 }}>That file has no student rows. Use the template as a guide.</div>}
+          {csv && csv.length > 0 && (
+            <div style={{ marginTop: 14 }} role="status">
               <p>{csv.length} rows found. First row: <b>{csv[0] && csv[0].name}</b>, class {csv[0] && csv[0].cls}.</p>
               <button className="btn" onClick={doImport}><Upload size={16} aria-hidden="true" />Import {csv.length} students</button>
             </div>
@@ -248,9 +250,9 @@ export function AdminStudents() {
       </div>
       <div className="list-head"><b>All students <span className="muted small">{shown.length} of {rows.length}</span></b>
         <input className="search" type="search" placeholder="Search name, class or parent" aria-label="Search students" value={filter} onChange={(e) => setFilter(e.target.value)} /></div>
-      <section className="panel" style={{ padding: 0, overflow: 'auto' }}>
+      <section className="panel" style={{ padding: 0, overflow: "auto" }} tabIndex={0} role="region" aria-label="Data table">
         <table>
-          <thead><tr><th>Student</th><th>Class</th><th>Parent</th><th>WhatsApp number</th><th>Language</th><th>Level</th><th></th></tr></thead>
+          <thead><tr><th scope="col">Student</th><th scope="col">Class</th><th scope="col">Parent</th><th scope="col">WhatsApp number</th><th scope="col">Language</th><th scope="col">Level</th><th scope="col"><span className="sr-only">Actions</span></th></tr></thead>
           <tbody>
             {shown.map((r) => edit && edit.id === r.id ? (
               <tr key={r.id} className="sel">
@@ -267,7 +269,7 @@ export function AdminStudents() {
                 <td>{r.parent_phone}{r.demo_number && <span className="muted small"> (demo)</span>}</td>
                 <td>{LANG_NAME[r.parent_language]}</td>
                 <td><span className={'tag ' + (r.tier === 'unscored' ? 'unscored' : r.tier)}><i />{TIER[r.tier]}</span></td>
-                <td><button className="btn alt" onClick={() => setEdit({ id: r.id, parent_name: r.parent_name, parent_phone: r.demo_number ? '' : r.parent_phone, parent_language: r.parent_language })}>Edit contact</button></td>
+                <td><button className="btn alt" aria-label={`Edit contact for ${r.name}`} onClick={() => setEdit({ id: r.id, parent_name: r.parent_name, parent_phone: r.demo_number ? '' : r.parent_phone, parent_language: r.parent_language })}>Edit contact</button></td>
               </tr>
             ))}
           </tbody>
@@ -292,7 +294,7 @@ export function AdminUsers({ me }) {
   const [edit, setEdit] = useState(null)
   const load = () => api('/admin/users').then(setUsers).catch((e) => setErr(e.message))
   useEffect(() => { load(); api('/classes').then((c) => setClasses(c.map((x) => x.cls))) }, [])
-  const run = async (fn, ok) => { setErr(''); setDone(''); try { await fn(); if (ok) setDone(ok); await load() } catch (e) { setErr(e.message) } }
+  const run = async (fn, ok) => { setErr(''); setDone(''); try { await fn(); if (ok) setDone(ok); await load(); return true } catch (e) { setErr(e.message); return false } }
   const create = (e) => { e.preventDefault(); run(() => api('/admin/users', { method: 'POST', body: form }).then(() => setForm({ username: '', name: '', password: '', role: 'teacher', classes: [] })), 'Account created. Share the username and password with them privately.') }
   const patch = (u, body, ok) => run(() => api('/admin/users/' + u.id, { method: 'PATCH', body }), ok)
   if (!users) return <div className="page" role="status">{err || 'Loading...'}</div>
@@ -323,9 +325,9 @@ export function AdminUsers({ me }) {
           </dl>
         </section>
       </div>
-      <section className="panel" style={{ padding: 0, overflow: 'auto' }}>
+      <section className="panel" style={{ padding: 0, overflow: "auto" }} tabIndex={0} role="region" aria-label="Data table">
         <table>
-          <thead><tr><th>Name</th><th>Username</th><th>Role</th><th>Classes</th><th>Status</th><th></th></tr></thead>
+          <thead><tr><th scope="col">Name</th><th scope="col">Username</th><th scope="col">Role</th><th scope="col">Classes</th><th scope="col">Status</th><th scope="col"><span className="sr-only">Actions</span></th></tr></thead>
           <tbody>
             {users.map((u) => (
               <tr key={u.id}>
@@ -335,10 +337,10 @@ export function AdminUsers({ me }) {
                 <td>
                   <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
                     {u.role === 'teacher' && (edit && edit.id === u.id
-                      ? <><button className="btn" onClick={() => patch(u, { classes: edit.classes }, 'Classes updated.').then(() => setEdit(null))}>Save</button><button className="btn alt" onClick={() => setEdit(null)}>Cancel</button></>
-                      : <button className="btn alt" onClick={() => setEdit({ id: u.id, classes: u.classes })}>Edit classes</button>)}
-                    <button className="btn alt" disabled={u.username === me.username && u.active} onClick={() => patch(u, { active: !u.active }, u.active ? 'Account disabled and signed out.' : 'Account enabled.')}>{u.active ? 'Disable' : 'Enable'}</button>
-                    <button className="btn alt" onClick={() => { const p = window.prompt(`New password for ${u.name} (at least 8 characters)`); if (p) patch(u, { password: p }, 'Password changed.') }}>Reset password</button>
+                      ? <><button className="btn" onClick={() => patch(u, { classes: edit.classes }, 'Classes updated.').then((ok) => ok && setEdit(null))}>Save</button><button className="btn alt" onClick={() => setEdit(null)}>Cancel</button></>
+                      : <button className="btn alt" aria-label={`Edit classes for ${u.name}`} onClick={() => setEdit({ id: u.id, classes: u.classes })}>Edit classes</button>)}
+                    <button className="btn alt" disabled={u.username === me.username && u.active} aria-label={`${u.active ? 'Disable' : 'Enable'} account for ${u.name}`} onClick={async () => { if (u.active && !(await ask({ title: `Disable ${u.name}?`, body: 'They are signed out straight away and cannot sign in until you enable the account again.', confirmLabel: 'Disable account', danger: true }))) return; patch(u, { active: !u.active }, u.active ? 'Account disabled and signed out.' : 'Account enabled.') }}>{u.active ? 'Disable' : 'Enable'}</button>
+                    <button className="btn alt" aria-label={`Reset password for ${u.name}`} onClick={async () => { const p = await ask({ title: `Reset password for ${u.name}`, body: 'Choose a new password of at least 8 characters. Share it with them privately.', input: { label: 'New password' }, confirmLabel: 'Reset password' }); if (p) patch(u, { password: p }, 'Password changed.') }}>Reset password</button>
                   </div>
                 </td>
               </tr>

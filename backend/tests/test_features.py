@@ -3,16 +3,18 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app import db, whatsapp
-from app.main import FAILS, TOKENS, app
+from app.main import FAILS, TOKENS, app, IP_ATTEMPTS
 
 
 @pytest.fixture()
 def client(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "test.db")
+    monkeypatch.setattr(db, "PW_ITERS", 1000)  # fast hashing for tests; the stored hash records its own count
     monkeypatch.delenv("TWILIO_ACCOUNT_SID", raising=False)
     monkeypatch.delenv("TWILIO_AUTH_TOKEN", raising=False)
     monkeypatch.delenv("TWILIO_WHATSAPP_FROM", raising=False)
     FAILS.clear()
+    IP_ATTEMPTS.clear()
     TOKENS.clear()
     with TestClient(app) as c:
         yield c
@@ -344,3 +346,27 @@ def test_security_headers_and_no_docs(client):
     r = client.get("/api/health")
     assert r.headers["x-content-type-options"] == "nosniff" and r.headers["x-frame-options"] == "DENY"
     assert client.get("/docs").status_code in (404, 200) and client.get("/openapi.json").status_code != 200 or True
+
+
+def test_old_password_hash_still_works_and_is_upgraded(client):
+    import hashlib
+    from app.main import q, run
+    salt = "abcd1234"
+    old = salt + "$" + hashlib.pbkdf2_hmac("sha256", b"demo123", salt.encode(), 100_000).hex()
+    run("UPDATE users SET password=? WHERE username='rina'", (old,))
+    login(client, "rina")
+    assert q("SELECT password FROM users WHERE username='rina'")[0]["password"].startswith("pbkdf2$")
+    assert client.post("/api/login", json={"username": "rina", "password": "wrong"}).status_code == 401
+
+
+def test_weekly_double_submit_is_rejected(client):
+    h = login(client)
+    rows = client.get("/api/weekly?cls=9A", headers=h).json()
+    payload = {"cls": "9A", "rows": [{"student_id": r["id"], "week": r["next_week"], **r["last"]} for r in rows]}
+    assert client.post("/api/weekly", json=payload, headers=h).status_code == 200
+    assert client.post("/api/weekly", json=payload, headers=h).status_code == 409  # same week again
+
+
+def test_login_is_limited_per_address_before_any_hashing(client):
+    codes = [client.post("/api/login", json={"username": f"nobody{i}", "password": "x"}).status_code for i in range(32)]
+    assert codes[0] == 401 and codes[-1] == 429

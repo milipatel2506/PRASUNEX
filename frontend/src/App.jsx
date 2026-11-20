@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useRef, useState } from 'react'
 import { BarChart3, ClipboardList, GraduationCap, LogOut, MessageSquare, RefreshCw, ScrollText, Send, Settings as SettingsIcon, ShieldCheck, UserCog, Users, Volume2 } from 'lucide-react'
 import { api, hasToken, setToken } from './api'
+import { ask, DialogHost } from './dialog'
 import { AdminStudents, AdminUsers, MessagesPage, ROLE, SettingsPage, WeeklyPage } from './pages'
 
 const LANG = { en: 'English', gu: 'ગુજરાતી', hi: 'हिन्दी' }
@@ -171,7 +172,7 @@ function ContactCard({ d, sid, reload, onChanged }) {
   }
   const remove = async () => {
     if (busy) return
-    if (!window.confirm(`Remove ${s.name} from class ${s.cls}? Their weekly data, plans and messages are deleted. This cannot be undone.`)) return
+    if (!(await ask({ title: `Remove ${s.name}?`, body: `${s.name} will be removed from class ${s.cls}. Their weekly data, plans and messages are deleted. This cannot be undone.`, confirmLabel: 'Remove student', danger: true }))) return
     setBusy(true)
     try { await api('/students/' + sid, { method: 'DELETE' }); onChanged(true) } catch (x) { setErr(x.message); setBusy(false) }
   }
@@ -264,12 +265,15 @@ function StudentPanel({ sid, onChanged }) {
       setLang(l); setPlan(p); setMsg(p.message)
     })
   }
-  const approve = () => wrap(async () => {
+  const approve = async () => {
     const to = live ? `${s.parent_name} (${s.parent_phone}) on WhatsApp` : `${s.parent_name} (simulated, nothing leaves this computer)`
-    if (!window.confirm(`Approve and send this message to ${to}? This cannot be undone.`)) return
+    // ask first, before the button is disabled, so keyboard focus can return to it afterwards
+    if (!(await ask({ title: 'Approve and send?', body: `This message goes to ${to}. It cannot be undone.`, confirmLabel: live ? 'Send on WhatsApp' : 'Approve (simulated)' }))) return
+    wrap(async () => {
     await api(`/plans/${plan.id}/approve`, { method: 'POST', body: { actions: plan.actions, message: msg, language: lang } })
     await load(); onChanged()
-  })
+    })
+  }
   const setOutcome = (id, outcome) => wrap(async () => { await api(`/interventions/${id}/outcome`, { method: 'POST', body: { outcome } }); await load() })
   const editAction = (i, text) => setPlan((p) => ({ ...p, actions: p.actions.map((a, j) => (j === i ? { ...a, text } : a)) }))
   const voice = () => {
@@ -351,7 +355,7 @@ function StudentPanel({ sid, onChanged }) {
               <LangSwitch lang={lang} onPick={switchLang} disabled={approved || busy} />
               <div className="phone">
                 <div className="bar2">{s.parent_name} | {live ? s.parent_phone + ' | WhatsApp' : 'WhatsApp (simulated)'}</div>
-                <div className="bubble">{msg}<div className="tick">{approved ? '✓ sent' : 'draft'}</div></div>
+                <div className="bubble" lang={lang}>{msg}<div className="tick">{approved ? '✓ sent' : 'draft'}</div></div>
               </div>
               {!approved && <textarea style={{ marginTop: 12, minHeight: 110 }} value={msg} onChange={(e) => setMsg(e.target.value)} aria-label="Edit message" />}
               <div className="row" style={{ marginTop: 12, flexWrap: 'wrap' }}>
@@ -371,16 +375,16 @@ function StudentPanel({ sid, onChanged }) {
           <h3>Outcome tracker</h3>
           <p className="muted small" style={{ margin: '4px 0 8px' }}>After the follow-up period, record what happened. SAARTHI learns which actions work best.</p>
           <table>
-            <thead><tr><th>Action</th><th>Type</th><th>Outcome</th></tr></thead>
+            <thead><tr><th scope="col">Action</th><th scope="col">Type</th><th scope="col">Outcome</th></tr></thead>
             <tbody>
               {d.interventions.map((i) => (
                 <tr key={i.id}>
                   <td>{i.text}</td><td>{KIND[i.kind] || i.kind}</td>
                   <td>{i.outcome ? <Tag kind={i.outcome === 'improved' ? 'approved' : i.outcome === 'declined' ? 'high' : 'medium'}>{i.outcome.replace('_', ' ')}</Tag> :
                     <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
-                      <button className="btn alt" disabled={busy || !d.can_edit} onClick={() => setOutcome(i.id, 'improved')}>Improved</button>
-                      <button className="btn alt" disabled={busy || !d.can_edit} onClick={() => setOutcome(i.id, 'no_change')}>No change</button>
-                      <button className="btn alt" disabled={busy || !d.can_edit} onClick={() => setOutcome(i.id, 'declined')}>Declined</button>
+                      <button className="btn alt" disabled={busy || !d.can_edit} aria-label={`Mark "${i.text.slice(0, 40)}" as improved`} onClick={() => setOutcome(i.id, 'improved')}>Improved</button>
+                      <button className="btn alt" disabled={busy || !d.can_edit} aria-label={`Mark "${i.text.slice(0, 40)}" as no change`} onClick={() => setOutcome(i.id, 'no_change')}>No change</button>
+                      <button className="btn alt" disabled={busy || !d.can_edit} aria-label={`Mark "${i.text.slice(0, 40)}" as declined`} onClick={() => setOutcome(i.id, 'declined')}>Declined</button>
                     </div>}</td>
                 </tr>
               ))}
@@ -556,9 +560,9 @@ function Audit() {
     <div className="page">
       {err && <div className="error" role="alert" style={{ marginBottom: 12 }}>{err}</div>}
       <div className="note">Every AI output is logged with exactly what was sent to the AI and who approved it. Only an anonymous reference, grade, risk reasons and topics are ever sent. Names and contact details are never included.</div>
-      <section className="panel" style={{ padding: 0 }}>
+      <section className="panel" style={{ padding: 0, overflow: 'auto' }} tabIndex={0} role="region" aria-label="AI audit log table">
         <table>
-          <thead><tr><th>Time</th><th>Student ref</th><th>Source</th><th>Language</th><th>Safety flags</th><th>Approved by</th><th></th></tr></thead>
+          <thead><tr><th scope="col">Time</th><th scope="col">Student ref</th><th scope="col">Source</th><th scope="col">Language</th><th scope="col">Safety flags</th><th scope="col">Approved by</th><th scope="col"><span className="sr-only">Actions</span></th></tr></thead>
           <tbody>
             {rows.map((r) => (
               <Fragment key={r.id}>
@@ -608,7 +612,7 @@ function ModelPage() {
         <section className="panel">
           <h3 className="sec">Fairness check</h3>
           <table>
-            <thead><tr><th>Group</th><th>Flag rate</th><th>Recall</th></tr></thead>
+            <thead><tr><th scope="col">Group</th><th scope="col">Flag rate</th><th scope="col">Recall</th></tr></thead>
             <tbody>{Object.entries(x.fairness).map(([g, v]) => <tr key={g}><td>{g === 'F' ? 'Girls' : 'Boys'}</td><td>{pct(v.flag_rate)}</td><td>{pct(v.recall)}</td></tr>)}</tbody>
           </table>
           <p className="muted small">Gender is never a model input. We check that flag rates and recall stay balanced across groups.</p>
@@ -663,6 +667,7 @@ export default function App() {
   return (
     <div className="app">
       <a href="#main" className="skip">Skip to content</a>
+      <DialogHost />
       <aside className="side">
         <div className="brand">SAARTHI<small>Student Success Copilot</small></div>
         <nav className="nav" aria-label="Main">
@@ -680,7 +685,7 @@ export default function App() {
           <button className="signout" onClick={() => { setToken(''); setUser(null) }}><LogOut size={16} aria-hidden="true" />Sign out</button>
         </div>
       </aside>
-      <main className="main" id="main">
+      <main className="main" id="main" tabIndex={-1}>
         <PageHead title={cur[2]} sub={cur[3]} />
         {tab === 'classes' && <Classes canEdit={role !== 'principal'} />}
         {tab === 'weekly' && <WeeklyPage />}

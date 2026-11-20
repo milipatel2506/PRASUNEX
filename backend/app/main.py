@@ -7,7 +7,7 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -131,21 +131,37 @@ class Login(BaseModel):
 
 
 FAILS: dict[str, list[float]] = {}
+IP_ATTEMPTS: dict[str, list[float]] = {}
 TOKEN_TTL = 8 * 3600
 
 
+DUMMY_HASH = db.hash_pw("not-a-real-password")  # so unknown usernames cost the same time as known ones
+
+
 @app.post("/api/login")
-def login(body: Login):
+def login(body: Login, request: Request):
     name = body.username.strip().lower()
+    ip = request.client.host if request.client else "unknown"
+    recent_ip = [t for t in IP_ATTEMPTS.get(ip, []) if t > time.time() - 60]
+    if len(recent_ip) >= 30:  # counted before any hashing, so floods cannot burn CPU
+        raise HTTPException(429, "Too many attempts from this computer. Try again in a minute.")
+    IP_ATTEMPTS[ip] = recent_ip + [time.time()]
+    if len(IP_ATTEMPTS) > 500:
+        for k in [k for k, v in IP_ATTEMPTS.items() if not v or v[-1] < time.time() - 60]:
+            IP_ATTEMPTS.pop(k, None)
     for k in [k for k, v in FAILS.items() if not v or v[-1] < time.time() - 60]:
         FAILS.pop(k, None)  # forget old failures so the table cannot grow forever
     recent = [t for t in FAILS.get(name, []) if t > time.time() - 60]
     if len(recent) >= 5:
         raise HTTPException(429, "Too many attempts. Try again in a minute.")
     rows = q("SELECT * FROM users WHERE username=?", (name,))
+    if not rows:
+        db.check_pw(body.password, DUMMY_HASH)
     if not rows or not db.check_pw(body.password, rows[0]["password"]):
         FAILS[name] = recent + [time.time()]
         raise HTTPException(401, "Wrong username or password")
+    if db.needs_rehash(rows[0]["password"]):  # quietly upgrade an older hash now that we know the password
+        run("UPDATE users SET password=? WHERE id=?", (db.hash_pw(body.password), rows[0]["id"]))
     if rows[0].get("active") == 0:
         raise HTTPException(403, "This account is disabled. Please contact the school admin.")
     FAILS.pop(name, None)

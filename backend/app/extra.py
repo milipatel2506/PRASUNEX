@@ -131,6 +131,7 @@ def weekly_form(cls: str, user: dict = Depends(user_dep)):
 
 class WeekRow(BaseModel):
     student_id: int
+    week: int | None = Field(default=None, ge=1, le=60)  # the week the form showed; stops a double submit adding two weeks
     attendance: float = Field(ge=0, le=1)
     homework: float = Field(ge=0, le=1)
     incidents: int = Field(ge=0, le=20)
@@ -159,6 +160,8 @@ def save_weekly(body: WeekReq, user: dict = Depends(user_dep)):
     try:
         for r in body.rows:
             wk = (con.execute("SELECT MAX(week) FROM weekly WHERE student_id=?", (r.student_id,)).fetchone()[0] or 0) + 1
+            if r.week is not None and r.week != wk:
+                raise HTTPException(409, "This week was already saved (or the data changed). Reload the page to see the latest week.")
             con.execute("INSERT INTO weekly(student_id,week,attendance,homework,incidents,maths,science,english,social,language) "
                         "VALUES(?,?,?,?,?,?,?,?,?,?)",
                         (r.student_id, wk, r.attendance, r.homework, r.incidents, r.maths, r.science, r.english, r.social, r.language))

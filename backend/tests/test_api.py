@@ -7,13 +7,15 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app import actions, db, model
-from app.main import FAILS, TOKENS, app
+from app.main import FAILS, TOKENS, app, IP_ATTEMPTS
 
 
 @pytest.fixture()
 def client(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "test.db")
+    monkeypatch.setattr(db, "PW_ITERS", 1000)  # fast hashing for tests; the stored hash records its own count
     FAILS.clear()
+    IP_ATTEMPTS.clear()
     TOKENS.clear()
     with TestClient(app) as c:
         yield c

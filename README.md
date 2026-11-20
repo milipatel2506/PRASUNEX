@@ -70,6 +70,8 @@ details. Its output passes guardrails; on any failure the template engine takes 
 - Weekly data entry: faculty record attendance, homework, incidents and marks; risk scores update immediately
 - Subjects: the five built-in subjects plus any subjects faculty add for their class (for example Computer Science); added subjects count towards the risk score and the weak-subject advice
 - Past weeks: view every recorded week for a class, by week or by student, and a weekly record on each student's page
+- Faculty can correct a wrongly entered week from the Past weeks view; the risk score updates at once
+- Send button with a number box: type the parent's WhatsApp number and press the send button. WhatsApp opens on that number with the message ready (click-to-chat), and you press Send there. With Twilio connected, the message is sent automatically instead
 - Faculty: add or remove students in their own classes, and save each parent's WhatsApp number on the student page
 - Admin: create and disable accounts, reset passwords, assign classes, add students, import a CSV, edit parent contacts
 - Messages outbox: every parent message with parent, language and status (sent, delivered, read, failed), plus a
@@ -86,7 +88,7 @@ numbers show that the pipeline works, not real-world accuracy.
 
 ## Tests
 
-60 automated tests cover login and roles, access control, safe approval (no double-send, blocked phone numbers and
+66 automated tests cover login and roles, access control, safe approval (no double-send, blocked phone numbers and
 links, input limits), weekly data entry and re-scoring, admin user and student management, the messages lifecycle,
 WhatsApp delivery (with a fake sender), upgrading an older database, the AI guardrails, the audit log and the model. Run them from `backend`:
 `.venv\Scripts\python -m pytest -q`. They use a throwaway database and never touch the demo data.

@@ -6,7 +6,7 @@ import { ask } from './dialog'
 export const ROLE = { teacher: 'Faculty', principal: 'Principal', admin: 'Admin' }
 const LANG = { en: 'English', gu: 'ગુજરાતી', hi: 'हिन्दी' }
 const LANG_NAME = { en: 'English', gu: 'Gujarati', hi: 'Hindi' }
-const STATUS = { queued: 'Queued', sending: 'Sending', sent: 'Sent', delivered: 'Delivered', read: 'Read', failed: 'Failed', undelivered: 'Undelivered' }
+const STATUS = { opened: 'Opened in WhatsApp', queued: 'Queued', sending: 'Sending', sent: 'Sent', delivered: 'Delivered', read: 'Read', failed: 'Failed', undelivered: 'Undelivered' }
 const TICKS = { sent: '✓', delivered: '✓✓', read: '✓✓' }
 const TIER = { high: 'High', medium: 'Medium', low: 'Low', unscored: 'Not scored' }
 
@@ -57,7 +57,7 @@ export function MessagesPage() {
           </section>
           {m && (
             <section className="panel">
-              <h3 className="sec">Parent's phone ({m.provider === 'twilio' ? 'real WhatsApp' : 'simulated'})</h3>
+              <h3 className="sec">Parent's phone ({m.provider === 'twilio' ? 'real WhatsApp' : m.provider === 'wa_link' ? 'WhatsApp link' : 'simulated'})</h3>
               <div className="phone">
                 <div className="bar2">SAARTHI School | official account</div>
                 <div className="bubble" lang={m.language}>{m.body}<div className={'tick ' + m.status}>{m.sent_at && m.sent_at.slice(11, 16)} <span aria-hidden="true">{TICKS[m.status] || ''}</span><span className="sr-only">{STATUS[m.status]}</span></div></div>
@@ -70,6 +70,15 @@ export function MessagesPage() {
                 <dt>Read</dt><dd>{when(m.read_at)}</dd>
               </dl>
               {m.error && <div className="error" role="alert" style={{ marginTop: 10 }}>Could not deliver: {m.error}</div>}
+              {m.provider === 'wa_link' && (
+                <>
+                  <p className="muted small" style={{ margin: '0 0 8px' }}>WhatsApp opened with this message. SAARTHI cannot see whether it was sent from there, so confirm it once you have pressed Send.</p>
+                  <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+                    {m.wa_link && <a className="btn alt" href={m.wa_link} target="_blank" rel="noopener noreferrer">Open WhatsApp again</a>}
+                    <button className="btn" disabled={busy || m.status === 'sent'} onClick={() => act('mark-sent')}>{m.status === 'sent' ? 'Marked as sent' : 'I pressed Send in WhatsApp'}</button>
+                  </div>
+                </>
+              )}
               {m.provider === 'simulated' && (
                 <>
                   <button className="btn alt" disabled={busy || m.status === 'read'} onClick={() => act('read')}>Simulate: parent opens the message</button>
@@ -92,8 +101,8 @@ const BLANK = { attendance: 90, homework: 80, incidents: 0, maths: 60, science: 
 const pctText = (x) => Math.round(x * 100) + '%'
 const mean = (xs) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0)
 
-export function WeeklyPage() {
-  const [view, setView] = useState('enter')
+export function WeeklyPage({ readOnly = false }) {
+  const [view, setView] = useState(readOnly ? 'past' : 'enter')
   const [classes, setClasses] = useState([])
   const [cls, setCls] = useState('')
   const [subjects, setSubjects] = useState({ extra: [], can_edit: false })
@@ -102,6 +111,8 @@ export function WeeklyPage() {
   const [done, setDone] = useState('')
   const [busy, setBusy] = useState(false)
   const [newSubject, setNewSubject] = useState('')
+  const [subBusy, setSubBusy] = useState(false)
+  const [saved, setSaved] = useState(false)  // the form was just saved: stops a second click adding another week
   const curCls = useRef('')
 
   useEffect(() => { api('/classes').then((c) => { setClasses(c); if (c[0]) setCls(c[0].cls) }).catch((e) => setErr(e.message)) }, [])
@@ -118,31 +129,40 @@ export function WeeklyPage() {
       setRows(r.map((s) => {
         const last = s.last || BLANK  // a brand-new student has no earlier week to copy from
         const v = { ...last, attendance: Math.round(last.attendance * 100), homework: Math.round(last.homework * 100) }
-        for (const n of sub.extra) v['x:' + n] = (s.last_extra || {})[n] ?? 60
+        for (const n of sub.extra) v['x:' + n] = (s.last_extra || {})[n] ?? ''  // no earlier marks: left empty so they are entered, not guessed
         return { id: s.id, name: s.name, roll: s.roll, week: s.next_week, v }
       }))
     }).catch((e) => setErr(e.message))
   }
-  useEffect(() => { curCls.current = cls; setRows([]); setDone(''); setErr(''); load() }, [cls])
-  const set = (id, k, val) => setRows((rs) => rs.map((r) => (r.id === id ? { ...r, v: { ...r.v, [k]: val } } : r)))
+  useEffect(() => { curCls.current = cls; setRows([]); setDone(''); setErr(''); setSaved(false); load() }, [cls])
+  const set = (id, k, val) => { setSaved(false); setRows((rs) => rs.map((r) => (r.id === id ? { ...r, v: { ...r.v, [k]: val } } : r))) }
 
   const addSubject = async (e) => {
-    e.preventDefault(); setErr(''); setDone('')
+    e.preventDefault()
+    if (subBusy) return
+    const c = cls
+    setErr(''); setDone(''); setSubBusy(true)
     try {
-      const r = await api('/subjects', { method: 'POST', body: { cls, name: newSubject } })
-      setSubjects((s) => ({ ...s, extra: [...s.extra, r.name].sort() }))
-      setRows((rs) => rs.map((x) => ({ ...x, v: { ...x.v, ['x:' + r.name]: 60 } })))  // keeps numbers already typed
-      setNewSubject(''); setDone(`${r.name} added to class ${cls}. Enter its marks below and save.`)
+      const r = await api('/subjects', { method: 'POST', body: { cls: c, name: newSubject } })
+      if (curCls.current === c) {  // ignore the answer if another class was opened meanwhile
+        setSubjects((x) => ({ ...x, extra: [...x.extra, r.name].sort() }))
+        setRows((rs) => rs.map((x) => ({ ...x, v: { ...x.v, ['x:' + r.name]: '' } })))  // empty: marks are entered, not guessed
+        setNewSubject(''); setSaved(false); setDone(`${r.name} added to class ${c}. Enter its marks below and save.`)
+      }
     } catch (x) { setErr(x.message) }
+    setSubBusy(false)
   }
   const removeSubject = async (name) => {
-    if (!(await ask({ title: `Remove ${name}?`, body: `${name} is removed from class ${cls} and all marks recorded for it are deleted. The built-in subjects are not affected.`, confirmLabel: 'Remove subject', danger: true }))) return
+    const c = cls
+    if (!(await ask({ title: `Remove ${name}?`, body: `${name} is removed from class ${c} and all marks recorded for it are deleted. The built-in subjects are not affected.`, confirmLabel: 'Remove subject', danger: true }))) return
     setErr(''); setDone('')
     try {
-      await api(`/subjects?cls=${encodeURIComponent(cls)}&name=${encodeURIComponent(name)}`, { method: 'DELETE' })
-      setSubjects((s) => ({ ...s, extra: s.extra.filter((n) => n !== name) }))
-      setRows((rs) => rs.map((x) => { const v = { ...x.v }; delete v['x:' + name]; return { ...x, v } }))
-      setDone(`${name} removed.`)
+      await api(`/subjects?cls=${encodeURIComponent(c)}&name=${encodeURIComponent(name)}`, { method: 'DELETE' })
+      if (curCls.current === c) {
+        setSubjects((x) => ({ ...x, extra: x.extra.filter((n) => n !== name) }))
+        setRows((rs) => rs.map((x) => { const v = { ...x.v }; delete v['x:' + name]; return { ...x, v } }))
+        setDone(`${name} removed.`)
+      }
     } catch (x) { setErr(x.message) }
   }
 
@@ -159,6 +179,7 @@ export function WeeklyPage() {
         maths: Number(r.v.maths), science: Number(r.v.science), english: Number(r.v.english), social: Number(r.v.social), language: Number(r.v.language),
         extra: Object.fromEntries(subjects.extra.map((n) => [n, Number(r.v['x:' + n])])) })) } })
       setDone(`Saved week ${rows[0] ? rows[0].week : ''} for ${res.saved} students. Risk scores were updated for ${res.scored} of them.`)
+      setSaved(true)
       await load()
     } catch (e) { setErr(e.message) }
     setBusy(false)
@@ -168,10 +189,12 @@ export function WeeklyPage() {
       <div className="seg" role="group" aria-label="Class">
         {classes.map((c) => <button key={c.cls} aria-pressed={cls === c.cls} className={cls === c.cls ? 'on' : ''} onClick={() => setCls(c.cls)}><b>Class {c.cls}</b></button>)}
       </div>
+      {!readOnly && (
       <div className="tabs" role="group" aria-label="Weekly data view">
         <button aria-pressed={view === 'enter'} className={view === 'enter' ? 'on' : ''} onClick={() => { setView('enter'); setDone(''); setErr('') }}>Enter this week</button>
         <button aria-pressed={view === 'past'} className={view === 'past' ? 'on' : ''} onClick={() => { setView('past'); setDone(''); setErr('') }}>Past weeks</button>
       </div>
+      )}
       <Err>{err}</Err><Done>{done}</Done>
       {view === 'past' ? <PastWeeks cls={cls} /> : (
         <>
@@ -190,7 +213,7 @@ export function WeeklyPage() {
                 <label>Add a subject
                   <input required minLength={2} maxLength={29} placeholder="For example Computer Science" value={newSubject} onChange={(e) => setNewSubject(e.target.value)} />
                 </label>
-                <button className="btn" type="submit">Add subject</button>
+                <button className="btn" type="submit" disabled={subBusy}>Add subject</button>
               </form>
             )}
             <p className="muted small" style={{ marginBottom: 0 }}>The five built-in subjects stay for every class. Added subjects count towards the risk score from the first week you enter marks for them.</p>
@@ -211,7 +234,7 @@ export function WeeklyPage() {
               </tbody>
             </table>
           </section>
-          <div style={{ marginTop: 16 }}><button className="btn" disabled={busy || !rows.length} onClick={save}>{busy ? 'Saving...' : `Save week for class ${cls}`}</button></div>
+          <div style={{ marginTop: 16 }}><button className="btn" disabled={busy || !rows.length || saved} onClick={save}>{busy ? 'Saving...' : saved ? 'Week saved' : `Save week for class ${cls}`}</button>{saved && <span className="muted small" style={{ marginLeft: 12 }}>Change a value to enter another week.</span>}</div>
         </>
       )}
     </div>
@@ -224,21 +247,47 @@ function PastWeeks({ cls }) {
   const [mode, setMode] = useState('week')
   const [week, setWeek] = useState(null)
   const [sid, setSid] = useState(null)
+  const [edit, setEdit] = useState(null)  // { week, v } while a week is being corrected
+  const [editErr, setEditErr] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [reload, setReload] = useState(0)
   useEffect(() => {
     let off = false
-    setH(null); setErr('')
+    setErr('')
     if (!cls) return undefined
     api('/weekly/history?cls=' + cls).then((r) => {
       if (off) return
-      setH(r); setWeek(r.weeks.length ? r.weeks[r.weeks.length - 1] : null); setSid(r.students.length ? r.students[0].id : null)
+      setH(r)
+      setWeek((w) => (w && r.weeks.includes(w) ? w : r.weeks.length ? r.weeks[r.weeks.length - 1] : null))
+      setSid((x) => (x && r.students.some((st) => st.id === x) ? x : r.students.length ? r.students[0].id : null))
     }).catch((e) => { if (!off) setErr(e.message) })
     return () => { off = true }
-  }, [cls])
+  }, [cls, reload])
+  useEffect(() => { setH(null); setEdit(null) }, [cls])
   if (err) return <Err>{err}</Err>
   if (!h) return <div role="status">Loading...</div>
   if (!h.weeks.length) return <div className="panel"><h3>No weeks recorded yet</h3><p className="muted">Enter this week's data and it will appear here.</p></div>
   const cols = [...h.core.map((c) => [c.key, c.label]), ...h.extra.map((n) => [n, n])]
-  const avg = (cell) => Math.round(mean(cols.map(([k]) => cell.marks[k]).filter((x) => x !== undefined)))
+  const avg = (cell) => { const v = cols.map(([k]) => cell.marks[k]).filter((x) => x !== undefined); return v.length ? Math.round(mean(v)) : '-' }
+  const startEdit = (w, c) => { setEditErr(''); setEdit({ week: w, v: { attendance: Math.round(c.attendance * 100), homework: Math.round(c.homework * 100), incidents: c.incidents, ...Object.fromEntries(cols.map(([k]) => [k, c.marks[k] ?? ''])) } }) }
+  const saveEdit = async () => {
+    const checks = [['attendance', 'Attendance', 0, 100], ['homework', 'Homework', 0, 100], ['incidents', 'Incidents', 0, 20], ...cols.map(([k, l]) => [k, l, 0, 100])]
+    for (const [k, label, lo, hi] of checks) {
+      const raw = edit.v[k]
+      if (raw === '' && h.extra.includes(k)) continue  // an older week may have no marks for a subject added later
+      const n = Number(raw)
+      if (raw === '' || Number.isNaN(n) || n < lo || n > hi) { setEditErr(`${label} must be a number from ${lo} to ${hi}.`); return }
+    }
+    setSaving(true); setEditErr('')
+    try {
+      const v = edit.v
+      await api(`/weekly/${sid}/${edit.week}`, { method: 'PATCH', body: { attendance: Number(v.attendance) / 100, homework: Number(v.homework) / 100, incidents: Math.round(Number(v.incidents)),
+        maths: Number(v.maths), science: Number(v.science), english: Number(v.english), social: Number(v.social), language: Number(v.language),
+        extra: Object.fromEntries(h.extra.filter((n) => v[n] !== '').map((n) => [n, Number(v[n])])) } })
+      setEdit(null); setReload((r) => r + 1)
+    } catch (x) { setEditErr(x.message) }
+    setSaving(false)
+  }
   const student = h.students.find((x) => x.id === sid)
   return (
     <div>
@@ -248,9 +297,20 @@ function PastWeeks({ cls }) {
       </div>
       {mode === 'week' ? (
         <>
-          <div className="seg" role="group" aria-label="Week">
-            {h.weeks.map((w) => <button key={w} aria-pressed={week === w} className={week === w ? 'on' : ''} onClick={() => setWeek(w)}><b>Week {w}</b></button>)}
-          </div>
+          {h.weeks.length > 12 ? (
+            <div className="row" style={{ gap: 8, marginBottom: 14, alignItems: 'end' }}>
+              <label className="small muted">Week
+                <select style={{ display: 'block', marginTop: 4 }} value={week ?? ''} onChange={(e) => setWeek(Number(e.target.value))}>
+                  {h.weeks.map((w) => <option key={w} value={w}>Week {w}</option>)}
+                </select>
+              </label>
+              <button className="btn alt" onClick={() => setWeek(h.weeks[h.weeks.length - 1])}>Latest week</button>
+            </div>
+          ) : (
+            <div className="seg" role="group" aria-label="Week">
+              {h.weeks.map((w) => <button key={w} aria-pressed={week === w} className={week === w ? 'on' : ''} onClick={() => setWeek(w)}><b>Week {w}</b></button>)}
+            </div>
+          )}
           <section className="panel" style={{ padding: 0, overflow: 'auto' }} tabIndex={0} role="region" aria-label={`Week ${week} data for class ${cls}`}>
             <table>
               <caption className="sr-only">Week {week} for class {cls}</caption>
@@ -276,18 +336,30 @@ function PastWeeks({ cls }) {
               {h.students.map((st) => <option key={st.id} value={st.id}>{st.roll}. {st.name}</option>)}
             </select>
           </label>
-          {student && (
+          {editErr && <Err>{editErr}</Err>}
+          {student && Object.keys(student.weeks).length === 0 && <div className="panel"><p className="muted" style={{ margin: 0 }}>No weeks are recorded for this student yet.</p></div>}
+          {student && Object.keys(student.weeks).length > 0 && (
             <section className="panel" style={{ padding: 0, overflow: 'auto' }} tabIndex={0} role="region" aria-label={`All weeks for ${student.name}`}>
               <table>
                 <caption className="sr-only">All recorded weeks for {student.name}</caption>
-                <thead><tr><th scope="col">Week</th><th scope="col">Attendance</th><th scope="col">Homework</th><th scope="col">Incidents</th>{cols.map(([k, l]) => <th scope="col" key={k}>{l}</th>)}<th scope="col">Average</th></tr></thead>
+                <thead><tr><th scope="col">Week</th><th scope="col">Attendance</th><th scope="col">Homework</th><th scope="col">Incidents</th>{cols.map(([k, l]) => <th scope="col" key={k}>{l}</th>)}<th scope="col">Average</th>{h.can_edit && <th scope="col"><span className="sr-only">Actions</span></th>}</tr></thead>
                 <tbody>
                   {h.weeks.map((w) => {
                     const c = student.weeks[w]
-                    return c ? (
+                    if (!c) return null
+                    if (edit && edit.week === w) {
+                      const inp = (k, aria) => <td key={k}><input type="number" className="cell" aria-label={`${aria} for week ${w}`} value={edit.v[k] ?? ''} onChange={(e) => setEdit({ ...edit, v: { ...edit.v, [k]: e.target.value } })} /></td>
+                      return (
+                        <tr key={w} className="sel"><th scope="row">Week {w}</th>{inp('attendance', 'Attendance %')}{inp('homework', 'Homework %')}{inp('incidents', 'Incidents')}
+                          {cols.map(([k, l]) => inp(k, l))}<td>-</td>
+                          <td><div className="row" style={{ gap: 6 }}><button className="btn" disabled={saving} onClick={saveEdit}>{saving ? 'Saving...' : 'Save'}</button><button className="btn alt" onClick={() => setEdit(null)}>Cancel</button></div></td></tr>
+                      )
+                    }
+                    return (
                       <tr key={w}><th scope="row">Week {w}</th><td>{pctText(c.attendance)}</td><td>{pctText(c.homework)}</td><td>{c.incidents}</td>
-                        {cols.map(([k]) => <td key={k}>{c.marks[k] === undefined ? '-' : Math.round(c.marks[k])}</td>)}<td><b>{avg(c)}</b></td></tr>
-                    ) : null
+                        {cols.map(([k]) => <td key={k}>{c.marks[k] === undefined ? '-' : Math.round(c.marks[k])}</td>)}<td><b>{avg(c)}</b></td>
+                        {h.can_edit && <td><button className="btn alt" aria-label={`Correct week ${w} for ${student.name}`} onClick={() => startEdit(w, c)}>Correct</button></td>}</tr>
+                    )
                   })}
                 </tbody>
               </table>

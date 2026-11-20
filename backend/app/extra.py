@@ -7,6 +7,7 @@ import json
 import re
 import sqlite3
 import time
+from urllib.parse import quote
 from typing import Literal
 
 from fastapi import Depends, HTTPException
@@ -56,6 +57,24 @@ def deliver_message(mid: int | None) -> None:
             (res["error"], mid))
 
 
+def wa_link(phone: str | None, body: str) -> str | None:
+    """Click-to-chat link: opens WhatsApp (app or web) to this number with the message typed, ready for the teacher to send."""
+    to = whatsapp.normalize(phone)
+    if not to or whatsapp.is_demo(phone):
+        return None
+    return f"https://wa.me/{to.lstrip('+')}?text={quote(body, safe='')}"
+
+
+def start_handoff(mid: int | None) -> str | None:
+    """Mark a message as handed to WhatsApp by link. We cannot see whether the teacher then pressed Send there."""
+    rows = q("SELECT * FROM messages WHERE id=?", (mid,)) if mid else []
+    link = wa_link(rows[0]["parent_phone"], rows[0]["body"]) if rows else None
+    if not link:
+        return None
+    run("UPDATE messages SET provider='wa_link', status='opened', channel='whatsapp (click-to-chat)', sent_at=NULL WHERE id=?", (mid,))
+    return link
+
+
 def _message(mid: int, user: dict) -> dict:
     rows = q("SELECT m.*, s.cls FROM messages m JOIN students s ON s.id=m.student_id WHERE m.id=?", (mid,))
     if not rows:
@@ -67,16 +86,34 @@ def _message(mid: int, user: dict) -> dict:
 
 @app.get("/api/messages")
 def list_messages(user: dict = Depends(user_dep)):
-    rows = q("""SELECT m.*, s.name student_name, s.cls, s.parent_name, s.first_en FROM messages m
-                JOIN students s ON s.id=m.student_id ORDER BY m.id DESC LIMIT 300""")
+    scope, args = "", ()
+    if user["role"] not in ("principal", "admin"):
+        if not user["classes"]:
+            return []
+        scope, args = "WHERE s.cls IN (%s)" % ",".join("?" * len(user["classes"])), tuple(user["classes"])
+    rows = q(f"""SELECT m.*, s.name student_name, s.cls, s.parent_name, s.first_en FROM messages m
+                JOIN students s ON s.id=m.student_id {scope} ORDER BY m.id DESC LIMIT 300""", args)
     rows = [r for r in rows if can_see(user, r["cls"])]
     _advance(rows)
     for r in rows:
         r["demo_number"] = whatsapp.is_demo(r["parent_phone"])
+        r["wa_link"] = wa_link(r["parent_phone"], r["body"]) if r.get("provider") == "wa_link" and can_write(user, r["cls"]) else None
         r["parent_phone"] = whatsapp.mask(r["parent_phone"])
         r["can_refresh"] = bool(r.get("provider_sid"))
         r.pop("provider_sid", None)
     return rows
+
+
+@app.post("/api/messages/{mid}/mark-sent")
+def mark_sent(mid: int, user: dict = Depends(user_dep)):
+    """The teacher confirms they pressed Send in WhatsApp after the click-to-chat link opened."""
+    m = _message(mid, user)
+    if not can_write(user, m["cls"]):
+        raise HTTPException(403, "Read-only access")
+    if m["provider"] != "wa_link":
+        raise HTTPException(409, "Only messages opened through a WhatsApp link can be marked as sent")
+    run("UPDATE messages SET status='sent', sent_at=COALESCE(sent_at, ?) WHERE id=?", (db.now(), mid))
+    return {"ok": True, "status": "sent"}
 
 
 @app.post("/api/messages/{mid}/read")
@@ -141,6 +178,8 @@ class SubjectIn(BaseModel):
 @app.post("/api/subjects")
 def add_subject(body: SubjectIn, user: dict = Depends(user_dep)):
     _writer(user, body.cls)
+    if body.cls not in all_classes():
+        raise HTTPException(404, f"Class {body.cls} does not exist")
     name = " ".join(body.name.split())
     if not SUBJECT_NAME_RE.match(name):
         raise HTTPException(422, "Use letters, numbers, spaces, & or - (2 to 29 characters), starting with a letter.")
@@ -149,7 +188,10 @@ def add_subject(body: SubjectIn, user: dict = Depends(user_dep)):
         raise HTTPException(409, f"{name} is already a subject for class {body.cls}")
     if len(_extra_subjects(body.cls)) >= MAX_EXTRA:
         raise HTTPException(409, f"A class can have at most {MAX_EXTRA} extra subjects")
-    run("INSERT INTO class_subjects(cls,name) VALUES(?,?)", (body.cls, name))
+    try:
+        run("INSERT INTO class_subjects(cls,name) VALUES(?,?)", (body.cls, name))
+    except sqlite3.IntegrityError:
+        raise HTTPException(409, f"{name} is already a subject for class {body.cls}")
     run("INSERT INTO activity(ts,actor,action,detail) VALUES(?,?,?,?)", (db.now(), user["name"], "subject_added", f"{name} (class {body.cls})"))
     return {"ok": True, "name": name}
 
@@ -190,14 +232,12 @@ def weekly_form(cls: str, user: dict = Depends(user_dep)):
         s["last"] = {k: base[k] for k in ("attendance", "homework", "incidents", *SUBJECTS)}
         prev = {r["subject"]: r["marks"] for r in q("SELECT subject, marks FROM weekly_extra WHERE student_id=? AND week=?",
                                                     (s["id"], base["week"]))} if last else {}
-        s["last_extra"] = {n: prev.get(n, 60.0) for n in extra_names}
+        s["last_extra"] = {n: prev.get(n) for n in extra_names}  # None: no earlier marks, so the form starts empty
         s["weeks_recorded"] = base["week"]
     return students
 
 
-class WeekRow(BaseModel):
-    student_id: int
-    week: int | None = Field(default=None, ge=1, le=60)  # the week the form showed; stops a double submit adding two weeks
+class WeekFields(BaseModel):
     attendance: float = Field(ge=0, le=1)
     homework: float = Field(ge=0, le=1)
     incidents: int = Field(ge=0, le=20)
@@ -207,6 +247,11 @@ class WeekRow(BaseModel):
     social: float = Field(ge=0, le=100)
     language: float = Field(ge=0, le=100)
     extra: dict[str, float] = Field(default_factory=dict, max_length=MAX_EXTRA)  # marks for faculty-added subjects
+
+
+class WeekRow(WeekFields):
+    student_id: int
+    week: int | None = Field(default=None, ge=1, le=60)  # the week the form showed; stops a double submit adding two weeks
 
 
 class WeekReq(BaseModel):
@@ -226,6 +271,8 @@ def save_weekly(body: WeekReq, user: dict = Depends(user_dep)):
     for r in body.rows:
         if set(r.extra) - known:
             raise HTTPException(400, f"Unknown subject: {', '.join(sorted(set(r.extra) - known))}")
+        if known - set(r.extra):
+            raise HTTPException(400, f"Enter marks for every subject (missing: {', '.join(sorted(known - set(r.extra)))})")
         if any(not 0 <= v <= 100 for v in r.extra.values()):
             raise HTTPException(422, "Marks must be between 0 and 100")
     con = db.connect()
@@ -243,12 +290,50 @@ def save_weekly(body: WeekReq, user: dict = Depends(user_dep)):
             saved += 1
             scored += 1 if scoring.rescore(con, r.student_id) else 0
         con.commit()
+    except sqlite3.IntegrityError:
+        con.rollback()
+        raise HTTPException(409, "That week was just saved by someone else. Reload the page to see it.")
     except Exception:
         con.rollback()
         raise
     finally:
         con.close()
     return {"saved": saved, "scored": scored}
+
+
+@app.patch("/api/weekly/{sid}/{week}")
+def fix_week(sid: int, week: int, body: WeekFields, user: dict = Depends(user_dep)):
+    """Correct a week that was entered wrongly. The risk score is recalculated straight away."""
+    rows = q("SELECT cls, name FROM students WHERE id=?", (sid,))
+    if not rows:
+        raise HTTPException(404, "Student not found")
+    _writer(user, rows[0]["cls"])
+    if not q("SELECT 1 FROM weekly WHERE student_id=? AND week=?", (sid, week)):
+        raise HTTPException(404, "That week has not been recorded for this student")
+    known = set(_extra_subjects(rows[0]["cls"]))
+    if set(body.extra) - known:
+        raise HTTPException(400, f"Unknown subject: {', '.join(sorted(set(body.extra) - known))}")
+    if any(not 0 <= v <= 100 for v in body.extra.values()):
+        raise HTTPException(422, "Marks must be between 0 and 100")
+    con = db.connect()
+    try:
+        con.execute("UPDATE weekly SET attendance=?, homework=?, incidents=?, maths=?, science=?, english=?, social=?, language=? "
+                    "WHERE student_id=? AND week=?",
+                    (body.attendance, body.homework, body.incidents, body.maths, body.science, body.english, body.social,
+                     body.language, sid, week))
+        con.execute("DELETE FROM weekly_extra WHERE student_id=? AND week=?", (sid, week))
+        for name, marks in body.extra.items():
+            con.execute("INSERT INTO weekly_extra(student_id,week,subject,marks) VALUES(?,?,?,?)", (sid, week, name, marks))
+        scoring.rescore(con, sid)
+        con.execute("INSERT INTO activity(ts,actor,action,detail) VALUES(?,?,?,?)",
+                    (db.now(), user["name"], "week_corrected", f"{rows[0]['name']} (class {rows[0]['cls']}), week {week}"))
+        con.commit()
+    except Exception:
+        con.rollback()
+        raise
+    finally:
+        con.close()
+    return {"ok": True}
 
 
 @app.get("/api/weekly/history")
@@ -271,7 +356,7 @@ def weekly_history(cls: str, user: dict = Depends(user_dep)):
         if cell is not None:
             cell["marks"][e["subject"]] = e["marks"]
     return {"core": [{"key": k, "label": v} for k, v in CORE.items()], "extra": _extra_subjects(cls),
-            "weeks": sorted(weeks), "students": students}
+            "weeks": sorted(weeks), "students": students, "can_edit": can_write(user, cls)}
 
 
 # ============================ admin ============================
@@ -340,6 +425,8 @@ def admin_update_user(uid: int, body: UserPatch, user: dict = Depends(user_dep))
         run("UPDATE users SET name=? WHERE id=?", (body.name, uid))
     if body.password:
         run("UPDATE users SET password=? WHERE id=?", (db.hash_pw(body.password), uid))
+        for t in [t for t, u in TOKENS.items() if u["username"] == target["username"]]:
+            TOKENS.pop(t, None)
     if body.active is not None:
         run("UPDATE users SET active=? WHERE id=?", (1 if body.active else 0, uid))
         if not body.active:  # sign them out everywhere

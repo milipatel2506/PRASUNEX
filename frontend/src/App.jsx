@@ -79,7 +79,7 @@ function PageHead({ title, sub }) {
 }
 
 /* ---------- sign in ---------- */
-function Login({ onLogin }) {
+function Login({ onLogin, notice }) {
   const [u, setU] = useState('')
   const [p, setP] = useState('')
   const [show, setShow] = useState(false)
@@ -109,6 +109,7 @@ function Login({ onLogin }) {
       </aside>
       <main className="login-form">
         <h2>Sign in</h2>
+        {notice && <div className="note" role="status">{notice}</div>}
         <p className="muted">Use your school account. Admin, faculty and principal accounts open different screens.</p>
         <form className="form" onSubmit={submit}>
           <label>Username<input autoComplete="username" required autoFocus value={u} onChange={(e) => setU(e.target.value)} /></label>
@@ -136,6 +137,14 @@ function Login({ onLogin }) {
       </main>
     </div>
   )
+}
+
+// same rules as the server: +<country><number>, or a bare 10-digit Indian number
+const normalizePhone = (p) => {
+  let raw = (p || '').replace(/[^\d+]/g, '')
+  if (raw.startsWith('00')) raw = '+' + raw.slice(2)
+  if (!raw.startsWith('+')) { if (raw.length === 10) raw = '+91' + raw; else return null }
+  return /^\+\d{10,15}$/.test(raw) ? raw : null
 }
 
 function LangSwitch({ lang, onPick, disabled }) {
@@ -211,7 +220,7 @@ function ContactCard({ d, sid, reload, onChanged }) {
 function WeeklyRecord({ d }) {
   const cols = d.subjects
   if (!d.weekly.length) return null
-  const cell = (w, c) => (c.extra ? w.extra[c.key] : w[c.key])
+  const cell = (w, c) => (c.extra ? (w.extra || {})[c.key] : w[c.key])
   return (
     <section className="panel">
       <h3 className="sec">Weekly record</h3>
@@ -240,18 +249,21 @@ function StudentPanel({ sid, onChanged }) {
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState('')
   const [voiceNote, setVoiceNote] = useState('')
+  const [sendTo, setSendTo] = useState('')
+  const [waLink, setWaLink] = useState('')
   const [err, setErr] = useState('')
 
   const load = async () => {
     const r = await api('/students/' + sid)
     setD(r)
+    setSendTo(r.student.demo_number ? '' : r.student.parent_phone)
     const latest = r.plans[0] || null
     setPlan(latest)
     setLang(latest ? latest.language : r.student.parent_language)
     setMsg(latest ? latest.message : '')
     setErr(''); setVoiceNote('')
   }
-  const refresh = async () => setD(await api('/students/' + sid))  // contact changes keep any unsaved plan edits
+  const refresh = async () => { const r = await api('/students/' + sid); setD(r); setSendTo(r.student.demo_number ? '' : r.student.parent_phone) }  // contact changes keep any unsaved plan edits
   useEffect(() => { load().catch((e) => setErr(e.message)) }, [sid])
   if (!d) return <div className="panel" role="status">{err || 'Loading...'}</div>
 
@@ -276,7 +288,9 @@ function StudentPanel({ sid, onChanged }) {
     )
   }
   const approved = plan && plan.status === 'approved'
-  const live = d.whatsapp_live && !s.demo_number  // a real send will happen only with WhatsApp connected and a real number
+  const target = normalizePhone(sendTo)  // the number in the box
+  const mode = target ? (d.whatsapp_live ? 'auto' : 'link') : 'sim'  // auto: sent by the server; link: opens WhatsApp; sim: demo outbox
+  const live = mode === 'auto'
 
   const wrap = async (fn) => { setBusy(true); setErr(''); try { await fn() } catch (e) { setErr(e.message) } finally { setBusy(false) } }
   const create = () => wrap(async () => {
@@ -291,15 +305,23 @@ function StudentPanel({ sid, onChanged }) {
     })
   }
   const approve = async () => {
-    const to = live ? `${s.parent_name} (${s.parent_phone}) on WhatsApp` : `${s.parent_name} (simulated, nothing leaves this computer)`
+    if (!msg.trim()) { setErr('The message is empty. Write something before approving.'); return }
+    if (sendTo.trim() && !target) { setErr('That WhatsApp number does not look valid. Use +91 followed by 10 digits.'); return }
+    const who = `${s.parent_name} (${target})`
+    const body = mode === 'auto' ? `This message is sent automatically on WhatsApp to ${who}. It cannot be undone.`
+      : mode === 'link' ? `WhatsApp opens with this message ready for ${who}. Press Send there to deliver it.`
+      : `This message goes to ${s.parent_name} (simulated, nothing leaves this computer). It cannot be undone.`
+    const label = mode === 'auto' ? 'Send on WhatsApp' : mode === 'link' ? 'Approve and open WhatsApp' : 'Approve (simulated)'
     // ask first, before the button is disabled, so keyboard focus can return to it afterwards
-    if (!(await ask({ title: 'Approve and send?', body: `This message goes to ${to}. It cannot be undone.`, confirmLabel: live ? 'Send on WhatsApp' : 'Approve (simulated)' }))) return
+    if (!(await ask({ title: 'Approve and send?', body, confirmLabel: label }))) return
     wrap(async () => {
-    await api(`/plans/${plan.id}/approve`, { method: 'POST', body: { actions: plan.actions, message: msg, language: lang } })
-    await load(); onChanged()
+      if (target && target !== s.parent_phone) await api(`/students/${sid}/contact`, { method: 'PATCH', body: { parent_phone: target } })
+      const out = await api(`/plans/${plan.id}/approve`, { method: 'POST', body: { actions: plan.actions, message: msg, language: lang, handoff: mode === 'link' } })
+      if (out.wa_link) { setWaLink(out.wa_link); window.open(out.wa_link, '_blank', 'noopener') }  // WhatsApp opens on the number from the box
+      await load(); onChanged()
     })
   }
-  const setOutcome = (id, outcome) => wrap(async () => { await api(`/interventions/${id}/outcome`, { method: 'POST', body: { outcome } }); await load() })
+  const setOutcome = (id, outcome) => wrap(async () => { await api(`/interventions/${id}/outcome`, { method: 'POST', body: { outcome } }); await refresh() })
   const editAction = (i, text) => setPlan((p) => ({ ...p, actions: p.actions.map((a, j) => (j === i ? { ...a, text } : a)) }))
   const voice = () => {
     const r = speak(msg, lang)
@@ -345,7 +367,6 @@ function StudentPanel({ sid, onChanged }) {
       </section>
 
       <ContactCard d={d} sid={sid} reload={refresh} onChanged={onChanged} />
-      <WeeklyRecord d={d} />
 
       <section className="panel">
         <div className="plan-head">
@@ -381,16 +402,38 @@ function StudentPanel({ sid, onChanged }) {
               <LangSwitch lang={lang} onPick={switchLang} disabled={approved || busy} />
               <div className="phone">
                 <div className="bar2">{s.parent_name} | {live ? s.parent_phone + ' | WhatsApp' : 'WhatsApp (simulated)'}</div>
-                <div className="bubble" lang={lang}>{msg}<div className="tick">{approved ? '✓ sent' : 'draft'}</div></div>
+                <div className="bubble" lang={lang}>{msg}<div className="tick">{approved ? (d.last_message && d.last_message.status === 'failed' ? 'failed' : d.last_message && d.last_message.provider === 'wa_link' ? 'opened in WhatsApp' : '✓ sent') : 'draft'}</div></div>
               </div>
               {!approved && <textarea style={{ marginTop: 12, minHeight: 110 }} value={msg} onChange={(e) => setMsg(e.target.value)} aria-label="Edit message" />}
+              {!approved && d.can_edit && (
+                <div className="sendto">
+                  <label htmlFor="sendto">Parent's WhatsApp number
+                    <input id="sendto" type="tel" inputMode="tel" autoComplete="off" placeholder="+91 98765 43210" value={sendTo}
+                      aria-invalid={sendTo.trim() && !target ? 'true' : undefined} aria-describedby="sendto-hint" onChange={(e) => setSendTo(e.target.value)} />
+                  </label>
+                  <p id="sendto-hint" className="muted small">
+                    {sendTo.trim() && !target ? 'This number does not look valid. Use +91 followed by 10 digits.'
+                      : mode === 'auto' ? 'Sent automatically on WhatsApp to this number.'
+                      : mode === 'link' ? 'WhatsApp opens on this number with the message ready. You press Send there.'
+                      : 'No number yet. Enter one to send on WhatsApp; without it the message stays in the simulated outbox.'}
+                  </p>
+                </div>
+              )}
               <div className="row" style={{ marginTop: 12, flexWrap: 'wrap' }}>
                 <button className="btn alt" onClick={voice}><Volume2 size={16} aria-hidden="true" />Play voice</button>
-                {!approved && d.can_edit && <button className="btn go" disabled={busy} onClick={approve}><Send size={16} aria-hidden="true" />{live ? 'Approve and send on WhatsApp' : 'Approve and send (simulated)'}</button>}
+                {!approved && d.can_edit && <button className="btn go" disabled={busy || !msg.trim()} onClick={approve}><Send size={16} aria-hidden="true" />{mode === 'auto' ? 'Approve and send on WhatsApp' : mode === 'link' ? 'Approve and open WhatsApp' : 'Approve and send (simulated)'}</button>}
                 {!approved && d.can_edit && <button className="btn alt" disabled={busy} onClick={create}><RefreshCw size={16} aria-hidden="true" />Redraft</button>}
+                {approved && d.can_edit && <button className="btn alt" disabled={busy} onClick={create}><RefreshCw size={16} aria-hidden="true" />Write a new plan</button>}
               </div>
               {voiceNote && <div className="flag" role="status">{voiceNote}</div>}
-              {approved && <div className="ok" role="status">Approved by {plan.approved_by}. {live ? `Sent to ${s.parent_name} (${s.parent_phone}).` : `Recorded in the simulated outbox for ${s.parent_name}; add a real WhatsApp number to send for real.`} Track delivery on the Messages page.</div>}
+              {approved && (
+                <div className="ok" role="status">
+                  Approved by {plan.approved_by}. {d.last_message && d.last_message.status === 'failed' ? `Delivery to ${s.parent_name} failed. Open the Messages page for the reason.` : d.last_message && d.last_message.provider === 'wa_link' ? `WhatsApp was opened for ${s.parent_name}. Press Send there, then mark it as sent.`
+                    : d.last_message && d.last_message.provider === 'twilio' ? `Sent to ${s.parent_name} on WhatsApp.`
+                    : `Recorded in the simulated outbox for ${s.parent_name}; add a real WhatsApp number to send for real.`} Track it on the Messages page.
+                  {waLink && <> <a href={waLink} target="_blank" rel="noopener noreferrer">Open WhatsApp again</a></>}
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -418,12 +461,14 @@ function StudentPanel({ sid, onChanged }) {
           </table>
         </section>
       )}
+
+      <WeeklyRecord d={d} />
     </div>
   )
 }
 
 /* ---------- teacher view ---------- */
-const NEW_STUDENT = { name: '', roll: '', parent_name: '', parent_phone: '', parent_language: 'gu' }
+const NEW_STUDENT = { name: '', roll: '', parent_name: '', parent_phone: '', parent_language: 'gu', first_gu: '', first_hi: '' }
 
 function AddStudent({ cls, onDone, onCancel }) {
   const [f, setF] = useState(NEW_STUDENT)
@@ -451,6 +496,10 @@ function AddStudent({ cls, onDone, onCancel }) {
           <label>Parent or guardian name<input value={f.parent_name} onChange={set('parent_name')} /></label>
           <label>Parent WhatsApp number<input placeholder="+91 98765 43210" value={f.parent_phone} onChange={set('parent_phone')} /></label>
         </div>
+        <div className="two">
+          <label>First name in Gujarati (optional)<input value={f.first_gu} onChange={set('first_gu')} /></label>
+          <label>First name in Hindi (optional)<input value={f.first_hi} onChange={set('first_hi')} /></label>
+        </div>
         <label>Message language<select value={f.parent_language} onChange={set('parent_language')}>{Object.entries(LANG_NAME).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select></label>
         <div className="row" style={{ gap: 8 }}><button className="btn" type="submit" disabled={busy}>Add student</button><button className="btn alt" type="button" onClick={onCancel}>Cancel</button></div>
       </form>
@@ -466,6 +515,7 @@ function Classes({ canEdit }) {
   const [list, setList] = useState([])
   const [sel, setSel] = useState(null)
   const [all, setAll] = useState(false)
+  const [loading, setLoading] = useState(true)
   const [err, setErr] = useState('')
   const curRef = useRef(null)
   curRef.current = cur
@@ -474,10 +524,10 @@ function Classes({ canEdit }) {
   const loadList = () => {
     const c = cur
     if (!c) return
-    api('/students?cls=' + c).then((r) => { if (curRef.current === c) { setList(r); setErr('') } }).catch((e) => setErr(e.message))
+    api('/students?cls=' + c).then((r) => { if (curRef.current === c) { setList(r); setErr('') } }).catch((e) => setErr(e.message)).finally(() => { if (curRef.current === c) setLoading(false) })
   }
   useEffect(() => { loadClasses() }, [])
-  useEffect(() => { setSel(null); loadList() }, [cur])
+  useEffect(() => { setSel(null); setList([]); setLoading(true); loadList() }, [cur])
 
   const flagged = list.filter((s) => s.tier === 'high' || s.tier === 'medium')
   const shown = all ? list : flagged
@@ -515,7 +565,7 @@ function Classes({ canEdit }) {
                 <div className="riskbar"><i style={{ width: s.risk * 100 + '%', background: TIER_BAR[s.tier] }} /></div>
               </button>
             ))}
-            {!shown.length && <div className="empty">{all ? 'This class has no students yet.' : 'No students flagged in this class. Use Show all students to see everyone.'}</div>}
+            {!shown.length && <div className="empty">{loading ? 'Loading students...' : list.length === 0 ? 'This class has no students yet. Use Add student above.' : all ? 'No students to show.' : 'No students flagged in this class. Use Show all students to see everyone.'}</div>}
           </div>
         </div>
         <div>{sel ? <StudentPanel key={sel} sid={sel} onChanged={(removed) => { if (removed === true) setSel(null); loadClasses(); loadList() }} /> :
@@ -660,24 +710,25 @@ function ModelPage() {
 export default function App() {
   const [user, setUser] = useState(null)
   const [ready, setReady] = useState(false)
+  const [notice, setNotice] = useState('')
   const [tab, setTab] = useState('classes')
 
   useEffect(() => {
     try { if (window.speechSynthesis) window.speechSynthesis.getVoices() } catch { /* voices load lazily */ }
-    const out = () => setUser(null)
+    const out = () => { setUser(null); setNotice('Your session ended. Please sign in again. Anything you had not saved was lost.') }
     window.addEventListener('saarthi-logout', out)
     if (hasToken()) api('/me').then(setUser).catch((e) => { if (e.status === 401) setToken('') }).finally(() => setReady(true))
     else setReady(true)
     return () => window.removeEventListener('saarthi-logout', out)
   }, [])
   if (!ready) return <div className="page" role="status">Loading...</div>
-  if (!user) return <Login onLogin={(u) => { setUser(u); setTab('classes') }} />
+  if (!user) return <Login notice={notice} onLogin={(u) => { setNotice(''); setUser(u); setTab('classes') }} />
 
   const role = user.role
   const all = role !== 'teacher'
   const T = {
     classes: [all ? 'All classes' : 'My classes', Users, 'Risk radar', 'Students ranked by risk of falling behind'],
-    weekly: ['Weekly data', ClipboardList, 'Weekly data entry', "Enter this week's attendance, homework and marks"],
+    weekly: ['Weekly data', ClipboardList, role === 'principal' ? 'Weekly data' : 'Weekly data entry', role === 'principal' ? 'Every recorded week for each class (read-only)' : "Enter this week's attendance, homework and marks"],
     messages: ['Messages', MessageSquare, 'Messages', 'Parent messages and their delivery status'],
     overview: ['School overview', BarChart3, 'School overview', 'Risk and outcomes across every class'],
     students: ['Students', GraduationCap, 'Students', 'Add students, import a spreadsheet, and manage parent contacts'],
@@ -687,7 +738,7 @@ export default function App() {
     model: ['Model and safety', ShieldCheck, 'Model and safety', 'How the risk model performs and how data is protected'],
   }
   const order = role === 'teacher' ? ['classes', 'weekly', 'messages', 'model']
-    : role === 'principal' ? ['classes', 'overview', 'messages', 'audit', 'model']
+    : role === 'principal' ? ['classes', 'overview', 'weekly', 'messages', 'audit', 'model']
     : ['classes', 'overview', 'weekly', 'messages', 'students', 'users', 'settings', 'audit', 'model']
   const cur = T[order.includes(tab) ? tab : 'classes']
   return (
@@ -708,13 +759,13 @@ export default function App() {
         </nav>
         <div className="who">
           <div className="who-row"><span className="avatar" aria-hidden="true">{initials(user.name)}</span><div><b>{user.name}</b><small>{ROLE[role]}</small></div></div>
-          <button className="signout" onClick={() => { setToken(''); setUser(null) }}><LogOut size={16} aria-hidden="true" />Sign out</button>
+          <button className="signout" onClick={() => { api('/logout', { method: 'POST' }).catch(() => {}); setToken(''); setUser(null) }}><LogOut size={16} aria-hidden="true" />Sign out</button>
         </div>
       </aside>
       <main className="main" id="main" tabIndex={-1}>
         <PageHead title={cur[2]} sub={cur[3]} />
         {tab === 'classes' && <Classes canEdit={role !== 'principal'} />}
-        {tab === 'weekly' && <WeeklyPage />}
+        {tab === 'weekly' && <WeeklyPage readOnly={role === 'principal'} />}
         {tab === 'messages' && <MessagesPage />}
         {tab === 'overview' && <Overview />}
         {tab === 'students' && <AdminStudents />}

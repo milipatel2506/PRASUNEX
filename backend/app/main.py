@@ -239,6 +239,7 @@ def student_detail(sid: int, user: dict = Depends(user_dep)):
     phone = s.get("parent_phone") if can_edit else whatsapp.mask(s.get("parent_phone"))  # principal sees it masked
     return {"student": {**s, "parent_phone": phone, "demo_number": whatsapp.is_demo(s.get("parent_phone"))},
             "can_edit": can_edit, "whatsapp_live": whatsapp.configured(),
+            "last_message": (q("SELECT id, provider, status FROM messages WHERE student_id=? ORDER BY id DESC LIMIT 1", (sid,)) or [None])[0],
             "risk": r, "weekly": weekly, "subjects": subjects, "plans": plans, "interventions": ints,
             "weakest_subject_label": weak_label(r["weakest_subject"]) if r else None}
 
@@ -312,6 +313,7 @@ class ApproveReq(BaseModel):
     actions: list[ActionIn] = Field(min_length=1, max_length=3)
     message: str = Field(min_length=1, max_length=1500)
     language: str
+    handoff: bool = False  # open WhatsApp (click-to-chat) for the saved number instead of an automatic send
 
 
 @app.post("/api/plans/{pid}/approve")
@@ -321,6 +323,8 @@ def approve(pid: int, body: ApproveReq, user: dict = Depends(user_dep)):
         raise HTTPException(404, "Plan not found")
     p = plan[0]
     s = get_student(p["student_id"], user, write=True)
+    if not body.message.strip() or any(not a.text.strip() for a in body.actions):
+        raise HTTPException(400, "The message and every action need some text")
     if p["status"] == "approved":
         raise HTTPException(409, "Already approved")
     if body.language not in LANGS:
@@ -360,13 +364,15 @@ def approve(pid: int, body: ApproveReq, user: dict = Depends(user_dep)):
         raise
     finally:
         con.close()
-    from .extra import deliver_message  # imported here: extra.py registers its routes on this app
+    from .extra import deliver_message, start_handoff  # imported here: extra.py registers its routes on this app
     try:
         deliver_message(mid)
     except Exception as e:  # the plan is already approved; record the failure instead of returning a 500
         run("UPDATE messages SET status='failed', error=? WHERE id=?", (str(e)[:200], mid))
     out = plan_out(q("SELECT * FROM plans WHERE id=?", (pid,))[0])
     out["message_id"] = mid
+    # With no automatic WhatsApp connection, a real number gets a click-to-chat link the teacher opens and sends from
+    out["wa_link"] = start_handoff(mid) if body.handoff and not whatsapp.configured() else None
     return out
 
 

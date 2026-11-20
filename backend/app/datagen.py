@@ -84,7 +84,7 @@ def features(d: dict, upto: int = 8) -> tuple[pd.DataFrame, np.ndarray]:
         "marks_last4": wk[:, h:].mean(1),
         "marks_vol": np.diff(wk, axis=1).std(1),
         "min_subj_last4": subj_last.min(1),
-        "n_below_pass": (subj_last < 40).sum(1),
+        "n_below_pass": (subj_last < 40).sum(1) * (5.0 / marks.shape[2]),  # per five subjects, so extra subjects do not inflate it
         "hw_first4": hw[:, :h].mean(1),
         "hw_last4": hw[:, h:].mean(1),
         "inc_first4": inc[:, :h].sum(1),

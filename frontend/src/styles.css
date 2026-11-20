@@ -175,6 +175,7 @@ pre { background: #0f172a; color: #dbe7ff; padding: 12px; border-radius: var(--r
 
 /* ---------- forms, messages, admin ---------- */
 .tag.unscored { background: #f1f5f9; color: #475569; border-color: var(--line-strong); }
+.tag.st-opened { background: var(--warn-weak, #fef3c7); color: var(--warn, #92400e); border-color: #fde68a; }
 .tag.st-queued, .tag.st-sending, .tag.st-sent { background: var(--primary-weak); color: var(--primary-ink); border-color: #bfdbfe; }
 .tag.st-delivered { background: var(--ok-weak); color: var(--ok); border-color: var(--ok-line); }
 .tag.st-read { background: #e0f2fe; color: #075985; border-color: #bae6fd; }
@@ -240,3 +241,9 @@ table { position: relative; }
 .subject-form label { display: grid; gap: 6px; font-weight: 600; flex: 1 1 260px; max-width: 420px; }
 
 tbody th[scope="row"] { text-transform: none; letter-spacing: normal; font-size: inherit; font-weight: 600; color: var(--ink); text-align: left; }
+
+.sendto { margin-top: 14px; }
+.sendto label { display: grid; gap: 6px; font-weight: 600; max-width: 360px; }
+.sendto p { margin: 6px 0 0; }
+
+input.cell { width: 76px; padding: 6px 8px; }

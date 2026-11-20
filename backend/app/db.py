@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS messages(id INTEGER PRIMARY KEY, plan_id INTEGER, stu
 CREATE TABLE IF NOT EXISTS ai_log(id INTEGER PRIMARY KEY, ts TEXT, student_ref TEXT, provider TEXT, language TEXT,
   input TEXT, output TEXT, flags TEXT, approved_by TEXT, plan_id INTEGER);
 CREATE TABLE IF NOT EXISTS class_subjects(cls TEXT, name TEXT, PRIMARY KEY(cls, name));
+CREATE UNIQUE INDEX IF NOT EXISTS ux_class_subjects_nocase ON class_subjects(cls, name COLLATE NOCASE);
 CREATE TABLE IF NOT EXISTS weekly_extra(student_id INTEGER, week INTEGER, subject TEXT, marks REAL, PRIMARY KEY(student_id, week, subject));
 CREATE TABLE IF NOT EXISTS activity(id INTEGER PRIMARY KEY, ts TEXT, actor TEXT, action TEXT, detail TEXT);
 CREATE INDEX IF NOT EXISTS ix_students_cls ON students(cls);

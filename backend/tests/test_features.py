@@ -391,7 +391,7 @@ def test_faculty_adds_subjects_and_enters_their_marks(client):
     assert client.post("/api/subjects", json={"cls": "8A", "name": "Art"}, headers=h).status_code == 403
     assert client.post("/api/subjects", json={"cls": "9A", "name": "Art"}, headers=login(client, "principal")).status_code == 403
     form = client.get("/api/weekly?cls=9A", headers=h).json()
-    assert form[0]["last_extra"] == {"Computer Science": 60.0}
+    assert form[0]["last_extra"] == {"Computer Science": None}  # no guessed marks: the form starts empty
     # marks for a subject that is not set up are refused
     assert _week(client, h, "9A", extra={"Drawing": 50}).status_code == 400
     assert _week(client, h, "9A", extra={"Computer Science": 120}).status_code in (400, 422)
@@ -421,3 +421,81 @@ def test_weekly_history_and_subject_removal(client):
     hist = client.get("/api/weekly/history?cls=9A", headers=h).json()
     assert hist["extra"] == [] and "Drawing" not in hist["students"][0]["weeks"]["9"]["marks"]
     assert client.delete("/api/subjects?cls=9A&name=Maths", headers=h).status_code == 404
+
+
+def _approve(client, h, sid, handoff):
+    pid = client.post(f"/api/students/{sid}/plan", json={}, headers=h).json()["id"]
+    plan = client.get(f"/api/students/{sid}", headers=h).json()["plans"][0]
+    body = {"actions": plan["actions"], "message": plan["message"], "language": plan["language"], "handoff": handoff}
+    return client.post(f"/api/plans/{pid}/approve", json=body, headers=h)
+
+
+def test_whatsapp_link_opens_chat_to_the_saved_number(client):
+    h = login(client)
+    s = flagged(client, h)
+    client.patch(f"/api/students/{s['id']}/contact", json={"parent_phone": "+91 98765 43210"}, headers=h)
+    out = _approve(client, h, s["id"], handoff=True).json()
+    assert out["wa_link"].startswith("https://wa.me/919876543210?text=")
+    assert "%20" in out["wa_link"] and " " not in out["wa_link"]
+    msg = next(m for m in client.get("/api/messages", headers=h).json() if m["id"] == out["message_id"])
+    assert msg["provider"] == "wa_link" and msg["status"] == "opened" and msg["wa_link"] == out["wa_link"]
+    assert client.post(f"/api/messages/{msg['id']}/mark-sent", headers=h).json()["status"] == "sent"
+    # a principal sees the message but never the link, and cannot mark it
+    hp = login(client, "principal")
+    seen = next(m for m in client.get("/api/messages", headers=hp).json() if m["id"] == msg["id"])
+    assert seen["wa_link"] is None and "98765" not in seen["parent_phone"]
+    assert client.post(f"/api/messages/{msg['id']}/mark-sent", headers=hp).status_code == 403
+
+
+def test_no_whatsapp_link_for_demo_numbers_or_when_not_requested(client):
+    h = login(client)
+    demo = flagged(client, h)  # placeholder number
+    assert _approve(client, h, demo["id"], handoff=True).json()["wa_link"] is None
+    other = next(r for r in client.get("/api/students?cls=9B", headers=login(client, "hetal")).json() if r["tier"] not in ("low", "unscored"))
+    client.patch(f"/api/students/{other['id']}/contact", json={"parent_phone": "9123456789"}, headers=h)
+    assert _approve(client, h, other["id"], handoff=False).json()["wa_link"] is None
+
+
+def test_correct_a_wrong_week_and_rescore(client):
+    h = login(client)
+    sid = client.get("/api/weekly?cls=9A", headers=h).json()[0]["id"]
+    before = client.get(f"/api/students/{sid}", headers=h).json()
+    wk = before["weekly"][-1]["week"]
+    fixed = {"attendance": 0.2, "homework": 0.1, "incidents": 5, "maths": 10, "science": 10, "english": 10, "social": 10, "language": 10, "extra": {}}
+    assert client.patch(f"/api/weekly/{sid}/{wk}", json=fixed, headers=h).status_code == 200
+    after = client.get(f"/api/students/{sid}", headers=h).json()
+    assert after["weekly"][-1]["maths"] == 10 and after["weekly"][-1]["attendance"] == 0.2
+    assert after["risk"]["risk"] >= before["risk"]["risk"]
+    assert client.patch(f"/api/weekly/{sid}/99", json=fixed, headers=h).status_code == 404
+    assert client.patch(f"/api/weekly/{sid}/{wk}", json=fixed, headers=login(client, "principal")).status_code == 403
+    assert client.patch(f"/api/weekly/{sid}/{wk}", json=fixed, headers=login(client, "nikhil")).status_code == 403
+    from app.main import q
+    assert q("SELECT 1 FROM activity WHERE action='week_corrected'")
+
+
+def test_every_subject_is_required_and_blank_messages_are_refused(client):
+    h = login(client)
+    client.post("/api/subjects", json={"cls": "9A", "name": "Art"}, headers=h)
+    r = _week(client, h, "9A")  # forgot the Art marks
+    assert r.status_code == 400 and "Art" in r.json()["detail"]
+    s = flagged(client, h)
+    pid = client.post(f"/api/students/{s['id']}/plan", json={}, headers=h).json()["id"]
+    plan = client.get(f"/api/students/{s['id']}", headers=h).json()["plans"][0]
+    bad = {"actions": plan["actions"], "message": "   ", "language": "en"}
+    assert client.post(f"/api/plans/{pid}/approve", json=bad, headers=h).status_code == 400
+
+
+def test_messages_list_is_filtered_per_class_in_sql(client):
+    h = login(client)
+    s = flagged(client, h)
+    _approve(client, h, s["id"], handoff=False)
+    assert len(client.get("/api/messages", headers=h).json()) == 1
+    assert client.get("/api/messages", headers=login(client, "nikhil")).json() == []
+
+
+def test_password_reset_signs_the_person_out(client):
+    h = login(client, "rina")
+    ha = login(client, "admin")
+    uid = next(u["id"] for u in client.get("/api/admin/users", headers=ha).json() if u["username"] == "rina")
+    assert client.patch(f"/api/admin/users/{uid}", json={"password": "newpassword1"}, headers=ha).status_code == 200
+    assert client.get("/api/me", headers=h).status_code == 401

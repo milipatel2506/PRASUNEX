@@ -22,7 +22,8 @@ export function DialogHost() {
   useEffect(() => {
     opener = (o) => {
       if (cur.current) cur.current.resolve(cur.current.input ? null : false)  // never leave an earlier question hanging
-      back.current = document.activeElement; cur.current = o; setVal(''); setD(o)
+      if (!cur.current) back.current = document.activeElement  // keep the first opener if a dialog replaces another
+      cur.current = o; setVal(''); setD(o)
     }
     return () => { opener = null }
   }, [])

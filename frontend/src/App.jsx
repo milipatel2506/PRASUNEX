@@ -137,6 +137,56 @@ function Login({ onLogin }) {
   )
 }
 
+/* ---------- parent contact + remove student ---------- */
+function ContactCard({ d, sid, reload, onChanged }) {
+  const s = d.student
+  const [open, setOpen] = useState(false)
+  const [f, setF] = useState({ parent_name: s.parent_name, parent_phone: s.demo_number ? '' : s.parent_phone, parent_language: s.parent_language })
+  const [err, setErr] = useState('')
+  const [ok, setOk] = useState('')
+  const save = async (e) => {
+    e.preventDefault(); setErr(''); setOk('')
+    try {
+      await api(`/students/${sid}/contact`, { method: 'PATCH', body: f })
+      await reload(); setOpen(false); setOk('Parent contact saved.')
+    } catch (x) { setErr(x.message) }
+  }
+  const remove = async () => {
+    if (!window.confirm(`Remove ${s.name} from class ${s.cls}? Their weekly data, plans and messages are deleted. This cannot be undone.`)) return
+    try { await api('/students/' + sid, { method: 'DELETE' }); onChanged(true) } catch (x) { setErr(x.message) }
+  }
+  return (
+    <section className="panel">
+      <div className="plan-head">
+        <h3>Parent contact</h3>
+        {d.can_edit && !open && <div className="row" style={{ gap: 8 }}>
+          <button className="btn alt" onClick={() => setOpen(true)}>{s.demo_number ? 'Add WhatsApp number' : 'Edit'}</button>
+          <button className="btn alt" onClick={remove}>Remove student</button>
+        </div>}
+      </div>
+      {err && <div className="error" role="alert">{err}</div>}
+      {ok && <div className="ok">{ok}</div>}
+      {!open ? (
+        <div className="meta">
+          <span>Parent <b>{s.parent_name}</b></span>
+          <span>WhatsApp <b>{s.demo_number ? 'not added yet' : s.parent_phone}</b></span>
+          <span>Language <b>{LANG_NAME[s.parent_language]}</b></span>
+        </div>
+      ) : (
+        <form className="form" onSubmit={save}>
+          <div className="two">
+            <label>Parent or guardian name<input value={f.parent_name} onChange={(e) => setF({ ...f, parent_name: e.target.value })} /></label>
+            <label>Parent WhatsApp number<input autoFocus placeholder="+91 98765 43210" value={f.parent_phone} onChange={(e) => setF({ ...f, parent_phone: e.target.value })} /></label>
+          </div>
+          <label>Message language<select value={f.parent_language} onChange={(e) => setF({ ...f, parent_language: e.target.value })}>{Object.entries(LANG_NAME).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select></label>
+          <div className="row" style={{ gap: 8 }}><button className="btn" type="submit">Save</button><button className="btn alt" type="button" onClick={() => setOpen(false)}>Cancel</button></div>
+        </form>
+      )}
+      {s.demo_number && <p className="muted small" style={{ marginBottom: 0 }}>No real number saved, so messages stay in the simulated outbox. Add the parent's number to send on WhatsApp.</p>}
+    </section>
+  )
+}
+
 /* ---------- student detail + action flow ---------- */
 function StudentPanel({ sid, onChanged }) {
   const [d, setD] = useState(null)
@@ -173,10 +223,12 @@ function StudentPanel({ sid, onChanged }) {
           </div>
           <div className="note" style={{ margin: 0 }}>Not scored yet. SAARTHI needs at least 4 weeks of attendance, marks and homework for this student. Enter them on the Weekly data page, and the risk score will appear here.</div>
         </section>
+        <ContactCard d={d} sid={sid} reload={load} onChanged={onChanged} />
       </div>
     )
   }
   const approved = plan && plan.status === 'approved'
+  const live = d.whatsapp_live && !s.demo_number  // a real send will happen only with WhatsApp connected and a real number
 
   const wrap = async (fn) => { setBusy(true); setErr(''); try { await fn() } catch (e) { setErr(e.message) } finally { setBusy(false) } }
   const create = () => wrap(async () => {
@@ -247,6 +299,8 @@ function StudentPanel({ sid, onChanged }) {
         </div>
       </section>
 
+      <ContactCard d={d} sid={sid} reload={load} onChanged={onChanged} />
+
       <section className="panel">
         <div className="plan-head">
           <h3>Action plan and parent message</h3>
@@ -279,13 +333,13 @@ function StudentPanel({ sid, onChanged }) {
               <h4 className="sec">Message to parent</h4>
               <LangSwitch onPick={switchLang} disabled={approved || busy} />
               <div className="phone">
-                <div className="bar2">Parent of {s.first_en} | WhatsApp (simulated)</div>
+                <div className="bar2">{s.parent_name} | {live ? s.parent_phone + ' | WhatsApp' : 'WhatsApp (simulated)'}</div>
                 <div className="bubble">{msg}<div className="tick">{approved ? '✓ sent' : 'draft'}</div></div>
               </div>
               {!approved && <textarea style={{ marginTop: 12, minHeight: 110 }} value={msg} onChange={(e) => setMsg(e.target.value)} aria-label="Edit message" />}
               <div className="row" style={{ marginTop: 12, flexWrap: 'wrap' }}>
                 <button className="btn alt" onClick={voice}><Volume2 size={16} aria-hidden="true" />Play voice</button>
-                {!approved && <button className="btn go" disabled={busy} onClick={approve}><Send size={16} aria-hidden="true" />Approve and send (simulated)</button>}
+                {!approved && <button className="btn go" disabled={busy} onClick={approve}><Send size={16} aria-hidden="true" />{live ? 'Approve and send on WhatsApp' : 'Approve and send (simulated)'}</button>}
                 {!approved && <button className="btn alt" disabled={busy} onClick={create}><RefreshCw size={16} aria-hidden="true" />Redraft</button>}
               </div>
               {voiceNote && <div className="flag">{voiceNote}</div>}
@@ -322,7 +376,44 @@ function StudentPanel({ sid, onChanged }) {
 }
 
 /* ---------- teacher view ---------- */
-function Classes() {
+const NEW_STUDENT = { name: '', roll: '', parent_name: '', parent_phone: '', parent_language: 'gu' }
+
+function AddStudent({ cls, onDone, onCancel }) {
+  const [f, setF] = useState(NEW_STUDENT)
+  const [err, setErr] = useState('')
+  const [busy, setBusy] = useState(false)
+  const set = (k) => (e) => setF({ ...f, [k]: e.target.value })
+  const submit = async (e) => {
+    e.preventDefault(); setBusy(true); setErr('')
+    try {
+      const r = await api('/students', { method: 'POST', body: { ...f, cls, roll: Number(f.roll) } })
+      onDone(r.id)
+    } catch (x) { setErr(x.message) }
+    setBusy(false)
+  }
+  return (
+    <section className="panel" style={{ marginBottom: 16 }}>
+      <div className="plan-head"><h3>Add a student to class {cls}</h3></div>
+      {err && <div className="error" role="alert">{err}</div>}
+      <form className="form" onSubmit={submit}>
+        <div className="two">
+          <label>Full name<input required autoFocus value={f.name} onChange={set('name')} /></label>
+          <label>Roll number<input required type="number" min="1" max="99" value={f.roll} onChange={set('roll')} /></label>
+        </div>
+        <div className="two">
+          <label>Parent or guardian name<input value={f.parent_name} onChange={set('parent_name')} /></label>
+          <label>Parent WhatsApp number<input placeholder="+91 98765 43210" value={f.parent_phone} onChange={set('parent_phone')} /></label>
+        </div>
+        <label>Message language<select value={f.parent_language} onChange={set('parent_language')}>{Object.entries(LANG_NAME).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select></label>
+        <div className="row" style={{ gap: 8 }}><button className="btn" type="submit" disabled={busy}>Add student</button><button className="btn alt" type="button" onClick={onCancel}>Cancel</button></div>
+      </form>
+      <p className="muted small" style={{ marginBottom: 0 }}>The new student gets a risk score after you enter 4 weeks of data on the Weekly data page.</p>
+    </section>
+  )
+}
+
+function Classes({ canEdit }) {
+  const [adding, setAdding] = useState(false)
   const [cls, setCls] = useState([])
   const [cur, setCur] = useState(null)
   const [list, setList] = useState([])
@@ -354,6 +445,9 @@ function Classes() {
           </button>
         ))}
       </div>
+      {canEdit && cur && !adding && <div style={{ marginBottom: 12 }}><button className="btn alt" onClick={() => setAdding(true)}>Add student to class {cur}</button></div>}
+      {adding && <AddStudent cls={cur} onCancel={() => setAdding(false)}
+        onDone={(id) => { setAdding(false); setAll(true); loadClasses(); loadList(); setSel(id) }} />}
       <div className="split">
         <div>
           <div className="list-head">
@@ -377,7 +471,7 @@ function Classes() {
             {!shown.length && <div className="empty">No students flagged in this class.</div>}
           </div>
         </div>
-        <div>{sel ? <StudentPanel key={sel} sid={sel} onChanged={() => { loadClasses(); loadList() }} /> :
+        <div>{sel ? <StudentPanel key={sel} sid={sel} onChanged={(removed) => { if (removed === true) setSel(null); loadClasses(); loadList() }} /> :
           <div className="panel"><h3>Select a student</h3><p className="muted">Pick someone from the risk radar to see why they were flagged and to create an action plan.</p></div>}</div>
       </div>
     </div>
@@ -570,7 +664,7 @@ export default function App() {
       </aside>
       <div className="main">
         <PageHead title={cur[2]} sub={cur[3]} />
-        {tab === 'classes' && <Classes />}
+        {tab === 'classes' && <Classes canEdit={role !== 'principal'} />}
         {tab === 'weekly' && <WeeklyPage />}
         {tab === 'messages' && <MessagesPage />}
         {tab === 'overview' && <Overview />}

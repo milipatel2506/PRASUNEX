@@ -68,6 +68,7 @@ details. Its output passes guardrails; on any failure the template engine takes 
 - Principal view: school overview and an AI audit log showing exactly what was sent to the AI
 - Username and password sign-in with three roles (Faculty, Principal, Admin); faculty cannot open other classes
 - Weekly data entry: faculty record attendance, homework, incidents and marks; risk scores update immediately
+- Faculty: add or remove students in their own classes, and save each parent's WhatsApp number on the student page
 - Admin: create and disable accounts, reset passwords, assign classes, add students, import a CSV, edit parent contacts
 - Messages outbox: every parent message with parent, language and status (sent, delivered, read, failed), plus a
   phone view of what the parent sees
@@ -83,7 +84,7 @@ numbers show that the pipeline works, not real-world accuracy.
 
 ## Tests
 
-50 automated tests cover login and roles, access control, safe approval (no double-send, blocked phone numbers and
+51 automated tests cover login and roles, access control, safe approval (no double-send, blocked phone numbers and
 links, input limits), weekly data entry and re-scoring, admin user and student management, the messages lifecycle,
 WhatsApp delivery (with a fake sender), upgrading an older database, the AI guardrails, the audit log and the model. Run them from `backend`:
 `.venv\Scripts\python -m pytest -q`. They use a throwaway database and never touch the demo data.

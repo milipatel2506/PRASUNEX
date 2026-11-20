@@ -281,6 +281,55 @@ def _add_student(s: StudentIn) -> int:
     return sid
 
 
+def _writer(user: dict, cls: str) -> None:
+    """Faculty can change students in their own classes, admin in every class. Principal is read-only."""
+    if user["role"] == "admin":
+        return
+    if user["role"] != "teacher" or cls not in user["classes"]:
+        raise HTTPException(403, "You can only change students in your own classes")
+
+
+class ContactPatch(BaseModel):
+    parent_name: str | None = Field(default=None, max_length=80)
+    parent_phone: str | None = Field(default=None, max_length=25)
+    parent_language: Literal["en", "gu", "hi"] | None = None
+
+
+@app.post("/api/students")
+def add_student(body: StudentIn, user: dict = Depends(user_dep)):
+    _writer(user, body.cls)
+    return {"id": _add_student(body)}
+
+
+@app.patch("/api/students/{sid}/contact")
+def update_contact(sid: int, body: ContactPatch, user: dict = Depends(user_dep)):
+    rows = q("SELECT cls FROM students WHERE id=?", (sid,))
+    if not rows:
+        raise HTTPException(404, "Student not found")
+    _writer(user, rows[0]["cls"])
+    _check_phone(body.parent_phone)
+    if body.parent_name is not None:
+        run("UPDATE students SET parent_name=? WHERE id=?", (body.parent_name.strip(), sid))
+    if body.parent_phone is not None and body.parent_phone.strip():
+        run("UPDATE students SET parent_phone=? WHERE id=?", (whatsapp.normalize(body.parent_phone), sid))
+    if body.parent_language:
+        run("UPDATE students SET parent_language=? WHERE id=?", (body.parent_language, sid))
+    return {"ok": True}
+
+
+@app.delete("/api/students/{sid}")
+def remove_student(sid: int, user: dict = Depends(user_dep)):
+    """Permanently removes a student and all of their records (weekly data, risk, plans, messages)."""
+    rows = q("SELECT cls FROM students WHERE id=?", (sid,))
+    if not rows:
+        raise HTTPException(404, "Student not found")
+    _writer(user, rows[0]["cls"])
+    for t in ("weekly", "risk", "plans", "interventions", "messages"):
+        run(f"DELETE FROM {t} WHERE student_id=?", (sid,))
+    run("DELETE FROM students WHERE id=?", (sid,))
+    return {"ok": True}
+
+
 @app.get("/api/admin/students")
 def admin_students(user: dict = Depends(user_dep)):
     _admin(user)

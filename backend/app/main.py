@@ -181,8 +181,11 @@ def student_detail(sid: int, user: dict = Depends(user_dep)):
         w["marks_avg"] = sum(w[k] for k in SUBJECT_LABEL) / len(SUBJECT_LABEL)
     plans = [plan_out(p) for p in q("SELECT * FROM plans WHERE student_id=? ORDER BY id DESC", (sid,))]
     ints = q("SELECT * FROM interventions WHERE student_id=? ORDER BY id DESC", (sid,))
-    return {"student": {**s, "parent_phone": whatsapp.mask(s.get("parent_phone"))}, "risk": r, "weekly": weekly,
-            "plans": plans, "interventions": ints,
+    can_edit = user["role"] == "admin" or (user["role"] == "teacher" and s["cls"] in user["classes"])
+    phone = s.get("parent_phone") if can_edit else whatsapp.mask(s.get("parent_phone"))  # principal sees it masked
+    return {"student": {**s, "parent_phone": phone, "demo_number": whatsapp.is_demo(s.get("parent_phone"))},
+            "can_edit": can_edit, "whatsapp_live": whatsapp.configured(),
+            "risk": r, "weekly": weekly, "plans": plans, "interventions": ints,
             "weakest_subject_label": SUBJECT_LABEL[r["weakest_subject"]] if r else None}
 
 

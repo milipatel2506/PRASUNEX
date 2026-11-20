@@ -285,3 +285,26 @@ def test_old_database_is_migrated(tmp_path, monkeypatch):
     assert row["parent_name"] == "Parent of Old" and row["parent_phone"].startswith("+91 00000")
     assert {"provider", "sent_at", "read_at"} <= {r["name"] for r in con.execute("PRAGMA table_info(messages)")}
     con.close()
+
+
+def test_faculty_add_contact_remove(client):
+    h = login(client)  # hetal: 9A, 9B
+    new = {"name": "Test Child", "cls": "9A", "roll": 77, "parent_name": "Mr Test", "parent_phone": "+91 98765 43210"}
+    sid = client.post("/api/students", json=new, headers=h).json()["id"]
+    d = client.get(f"/api/students/{sid}", headers=h).json()
+    assert d["can_edit"] and d["student"]["parent_phone"] == "+919876543210" and not d["student"]["demo_number"]
+    # other class is refused
+    assert client.post("/api/students", json={**new, "cls": "8A", "roll": 78}, headers=h).status_code == 403
+    # change the number, reject a bad one
+    assert client.patch(f"/api/students/{sid}/contact", json={"parent_phone": "12"}, headers=h).status_code == 422
+    assert client.patch(f"/api/students/{sid}/contact", json={"parent_phone": "+91 91234 56789"}, headers=h).status_code == 200
+    assert client.get(f"/api/students/{sid}", headers=h).json()["student"]["parent_phone"] == "+919123456789"
+    # principal cannot edit and sees a masked number
+    hp = login(client, "principal")
+    assert client.get(f"/api/students/{sid}", headers=hp).json()["can_edit"] is False
+    assert client.patch(f"/api/students/{sid}/contact", json={"parent_name": "x"}, headers=hp).status_code == 403
+    assert client.delete(f"/api/students/{sid}", headers=hp).status_code == 403
+    # another faculty cannot remove
+    assert client.delete(f"/api/students/{sid}", headers=login(client, "nikhil")).status_code == 403
+    assert client.delete(f"/api/students/{sid}", headers=h).status_code == 200
+    assert client.get(f"/api/students/{sid}", headers=h).status_code == 404

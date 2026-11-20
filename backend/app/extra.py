@@ -4,6 +4,7 @@ Registered on the same FastAPI app as main.py (main imports this module before m
 """
 from __future__ import annotations
 import json
+import re
 import sqlite3
 import time
 from typing import Literal
@@ -115,16 +116,81 @@ def _entry_check(user: dict, cls: str) -> None:
         raise HTTPException(403, "This class is not yours")
 
 
+from .datagen import SUBJECT_LABEL as CORE  # one set of subject names everywhere
+SUBJECT_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9 &\-]{1,28}$")
+MAX_EXTRA = 12
+
+
+def _extra_subjects(cls: str) -> list[str]:
+    return [r["name"] for r in q("SELECT name FROM class_subjects WHERE cls=? ORDER BY name", (cls,))]
+
+
+@app.get("/api/subjects")
+def list_subjects(cls: str, user: dict = Depends(user_dep)):
+    if not can_see(user, cls):
+        raise HTTPException(403, "This class is not yours")
+    return {"core": [{"key": k, "label": v} for k, v in CORE.items()], "extra": _extra_subjects(cls),
+            "can_edit": can_write(user, cls)}
+
+
+class SubjectIn(BaseModel):
+    cls: str = Field(pattern=r"^[0-9]{1,2}[A-Z]$")
+    name: str = Field(min_length=2, max_length=30)
+
+
+@app.post("/api/subjects")
+def add_subject(body: SubjectIn, user: dict = Depends(user_dep)):
+    _writer(user, body.cls)
+    name = " ".join(body.name.split())
+    if not SUBJECT_NAME_RE.match(name):
+        raise HTTPException(422, "Use letters, numbers, spaces, & or - (2 to 29 characters), starting with a letter.")
+    taken = {v.lower() for v in CORE.values()} | set(CORE) | {n.lower() for n in _extra_subjects(body.cls)}
+    if name.lower() in taken:
+        raise HTTPException(409, f"{name} is already a subject for class {body.cls}")
+    if len(_extra_subjects(body.cls)) >= MAX_EXTRA:
+        raise HTTPException(409, f"A class can have at most {MAX_EXTRA} extra subjects")
+    run("INSERT INTO class_subjects(cls,name) VALUES(?,?)", (body.cls, name))
+    run("INSERT INTO activity(ts,actor,action,detail) VALUES(?,?,?,?)", (db.now(), user["name"], "subject_added", f"{name} (class {body.cls})"))
+    return {"ok": True, "name": name}
+
+
+@app.delete("/api/subjects")
+def remove_subject(cls: str, name: str, user: dict = Depends(user_dep)):
+    """Removes a faculty-added subject from a class together with its recorded marks. Built-in subjects cannot be removed."""
+    _writer(user, cls)
+    if name not in _extra_subjects(cls):
+        raise HTTPException(404, "Subject not found")
+    con = db.connect()
+    try:
+        con.execute("DELETE FROM weekly_extra WHERE subject=? AND student_id IN (SELECT id FROM students WHERE cls=?)", (name, cls))
+        con.execute("DELETE FROM class_subjects WHERE cls=? AND name=?", (cls, name))
+        ids = [r["id"] for r in con.execute("SELECT id FROM students WHERE cls=?", (cls,)).fetchall()]
+        for sid in ids:  # the score no longer includes the removed subject
+            scoring.rescore(con, sid)
+        con.execute("INSERT INTO activity(ts,actor,action,detail) VALUES(?,?,?,?)", (db.now(), user["name"], "subject_removed", f"{name} (class {cls})"))
+        con.commit()
+    except Exception:
+        con.rollback()
+        raise
+    finally:
+        con.close()
+    return {"ok": True}
+
+
 @app.get("/api/weekly")
 def weekly_form(cls: str, user: dict = Depends(user_dep)):
     _entry_check(user, cls)
     students = q("SELECT id, name, roll FROM students WHERE cls=? ORDER BY roll", (cls,))
+    extra_names = _extra_subjects(cls)
     for s in students:
         last = q("SELECT * FROM weekly WHERE student_id=? ORDER BY week DESC LIMIT 1", (s["id"],))
         base = last[0] if last else {"week": 0, "attendance": 0.9, "homework": 0.8, "incidents": 0,
                                      **{k: 60.0 for k in SUBJECTS}}
         s["next_week"] = base["week"] + 1
         s["last"] = {k: base[k] for k in ("attendance", "homework", "incidents", *SUBJECTS)}
+        prev = {r["subject"]: r["marks"] for r in q("SELECT subject, marks FROM weekly_extra WHERE student_id=? AND week=?",
+                                                    (s["id"], base["week"]))} if last else {}
+        s["last_extra"] = {n: prev.get(n, 60.0) for n in extra_names}
         s["weeks_recorded"] = base["week"]
     return students
 
@@ -140,6 +206,7 @@ class WeekRow(BaseModel):
     english: float = Field(ge=0, le=100)
     social: float = Field(ge=0, le=100)
     language: float = Field(ge=0, le=100)
+    extra: dict[str, float] = Field(default_factory=dict, max_length=MAX_EXTRA)  # marks for faculty-added subjects
 
 
 class WeekReq(BaseModel):
@@ -155,6 +222,12 @@ def save_weekly(body: WeekReq, user: dict = Depends(user_dep)):
         raise HTTPException(400, "Each student can appear only once")
     if any(r.student_id not in ids for r in body.rows):
         raise HTTPException(400, f"Some students are not in class {body.cls}")
+    known = set(_extra_subjects(body.cls))
+    for r in body.rows:
+        if set(r.extra) - known:
+            raise HTTPException(400, f"Unknown subject: {', '.join(sorted(set(r.extra) - known))}")
+        if any(not 0 <= v <= 100 for v in r.extra.values()):
+            raise HTTPException(422, "Marks must be between 0 and 100")
     con = db.connect()
     saved = scored = 0
     try:
@@ -165,6 +238,8 @@ def save_weekly(body: WeekReq, user: dict = Depends(user_dep)):
             con.execute("INSERT INTO weekly(student_id,week,attendance,homework,incidents,maths,science,english,social,language) "
                         "VALUES(?,?,?,?,?,?,?,?,?,?)",
                         (r.student_id, wk, r.attendance, r.homework, r.incidents, r.maths, r.science, r.english, r.social, r.language))
+            for name, marks in r.extra.items():
+                con.execute("INSERT INTO weekly_extra(student_id,week,subject,marks) VALUES(?,?,?,?)", (r.student_id, wk, name, marks))
             saved += 1
             scored += 1 if scoring.rescore(con, r.student_id) else 0
         con.commit()
@@ -174,6 +249,29 @@ def save_weekly(body: WeekReq, user: dict = Depends(user_dep)):
     finally:
         con.close()
     return {"saved": saved, "scored": scored}
+
+
+@app.get("/api/weekly/history")
+def weekly_history(cls: str, user: dict = Depends(user_dep)):
+    """Every recorded week for a class: one block per student, keyed by week number. Read-only, so principals may view it."""
+    if not can_see(user, cls):
+        raise HTTPException(403, "This class is not yours")
+    students = q("SELECT id, name, roll FROM students WHERE cls=? ORDER BY roll", (cls,))
+    weeks: set[int] = set()
+    by_id = {s["id"]: s for s in students}
+    for s in students:
+        s["weeks"] = {}
+    for w in q("SELECT w.* FROM weekly w JOIN students s ON s.id=w.student_id WHERE s.cls=? ORDER BY w.week", (cls,)):
+        weeks.add(w["week"])
+        marks = {k: w[k] for k in CORE}
+        by_id[w["student_id"]]["weeks"][w["week"]] = {"attendance": w["attendance"], "homework": w["homework"],
+                                                       "incidents": w["incidents"], "marks": marks}
+    for e in q("SELECT e.* FROM weekly_extra e JOIN students s ON s.id=e.student_id WHERE s.cls=?", (cls,)):
+        cell = by_id[e["student_id"]]["weeks"].get(e["week"])
+        if cell is not None:
+            cell["marks"][e["subject"]] = e["marks"]
+    return {"core": [{"key": k, "label": v} for k, v in CORE.items()], "extra": _extra_subjects(cls),
+            "weeks": sorted(weeks), "students": students}
 
 
 # ============================ admin ============================
@@ -340,7 +438,7 @@ def remove_student(sid: int, user: dict = Depends(user_dep)):
     con = db.connect()
     try:  # one transaction: either everything is removed or nothing is
         con.execute("DELETE FROM ai_log WHERE plan_id IN (SELECT id FROM plans WHERE student_id=?)", (sid,))
-        for t in ("weekly", "risk", "plans", "interventions", "messages"):
+        for t in ("weekly", "weekly_extra", "risk", "plans", "interventions", "messages"):
             con.execute(f"DELETE FROM {t} WHERE student_id=?", (sid,))
         con.execute("DELETE FROM students WHERE id=?", (sid,))
         con.execute("INSERT INTO activity(ts,actor,action,detail) VALUES(?,?,?,?)",

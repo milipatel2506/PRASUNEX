@@ -128,3 +128,17 @@ BODY = {
            "- कक्षा शिक्षक, {cls}"),
 }
 AND = {"en": " and ", "gu": " અને ", "hi": " और "}
+
+
+def subject_label(key: str, lang: str = "en") -> str:
+    """Display name for a subject key. Built-in subjects are translated; a faculty-added subject ('x:Name') keeps its own name."""
+    if key in SUBJECT_NAME:
+        return SUBJECT_NAME[key][lang]
+    return key[2:] if key.startswith("x:") else key
+
+
+def subject_topics(key: str) -> list[str]:
+    if key in TOPICS:
+        return TOPICS[key]
+    n = subject_label(key)
+    return [f"recent {n} classwork", f"key ideas in {n}", f"{n} practice questions"]

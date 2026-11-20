@@ -370,3 +370,54 @@ def test_weekly_double_submit_is_rejected(client):
 def test_login_is_limited_per_address_before_any_hashing(client):
     codes = [client.post("/api/login", json={"username": f"nobody{i}", "password": "x"}).status_code for i in range(32)]
     assert codes[0] == 401 and codes[-1] == 429
+
+
+def _week(client, h, cls, extra=None, **over):
+    rows = client.get(f"/api/weekly?cls={cls}", headers=h).json()
+    body = {"cls": cls, "rows": [{"student_id": r["id"], "week": r["next_week"], **r["last"], **over,
+                                  "extra": dict(extra or {})} for r in rows]}
+    return client.post("/api/weekly", json=body, headers=h)
+
+
+def test_faculty_adds_subjects_and_enters_their_marks(client):
+    h = login(client)
+    assert client.get("/api/subjects?cls=9A", headers=h).json()["extra"] == []
+    assert client.post("/api/subjects", json={"cls": "9A", "name": "Computer Science"}, headers=h).status_code == 200
+    # duplicates, built-in names and rubbish are refused
+    assert client.post("/api/subjects", json={"cls": "9A", "name": "computer science"}, headers=h).status_code == 409
+    assert client.post("/api/subjects", json={"cls": "9A", "name": "Maths"}, headers=h).status_code == 409
+    assert client.post("/api/subjects", json={"cls": "9A", "name": "<b>x</b>"}, headers=h).status_code == 422
+    # other class, principal: refused
+    assert client.post("/api/subjects", json={"cls": "8A", "name": "Art"}, headers=h).status_code == 403
+    assert client.post("/api/subjects", json={"cls": "9A", "name": "Art"}, headers=login(client, "principal")).status_code == 403
+    form = client.get("/api/weekly?cls=9A", headers=h).json()
+    assert form[0]["last_extra"] == {"Computer Science": 60.0}
+    # marks for a subject that is not set up are refused
+    assert _week(client, h, "9A", extra={"Drawing": 50}).status_code == 400
+    assert _week(client, h, "9A", extra={"Computer Science": 120}).status_code in (400, 422)
+    assert _week(client, h, "9A", extra={"Computer Science": 12}).status_code == 200
+    # a student with very low marks in the new subject now has it as the weakest subject
+    d = client.get(f"/api/students/{form[0]['id']}", headers=h).json()
+    assert d["weekly"][-1]["extra"] == {"Computer Science": 12}
+    assert d["subjects"][-1] == {"key": "Computer Science", "label": "Computer Science", "extra": True}
+    assert d["risk"]["weakest_subject"] == "x:Computer Science" and d["weakest_subject_label"] == "Computer Science"
+    # and a plan can be written for it
+    assert client.post(f"/api/students/{form[0]['id']}/plan", json={}, headers=h).status_code == 200
+
+
+def test_weekly_history_and_subject_removal(client):
+    h = login(client)
+    client.post("/api/subjects", json={"cls": "9A", "name": "Drawing"}, headers=h)
+    assert _week(client, h, "9A", extra={"Drawing": 70}).status_code == 200
+    hist = client.get("/api/weekly/history?cls=9A", headers=h).json()
+    assert hist["weeks"] == list(range(1, 10)) and hist["extra"] == ["Drawing"]
+    last = hist["students"][0]["weeks"]["9"]
+    assert last["marks"]["Drawing"] == 70 and "maths" in last["marks"] and "attendance" in last
+    # principal may view, another faculty may not
+    assert client.get("/api/weekly/history?cls=9A", headers=login(client, "principal")).status_code == 200
+    assert client.get("/api/weekly/history?cls=9A", headers=login(client, "nikhil")).status_code == 403
+    # removing the subject deletes its marks but keeps the built-in data
+    assert client.delete("/api/subjects?cls=9A&name=Drawing", headers=h).status_code == 200
+    hist = client.get("/api/weekly/history?cls=9A", headers=h).json()
+    assert hist["extra"] == [] and "Drawing" not in hist["students"][0]["weeks"]["9"]["marks"]
+    assert client.delete("/api/subjects?cls=9A&name=Maths", headers=h).status_code == 404

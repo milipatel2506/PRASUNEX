@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import actions, db, model, whatsapp
-from .content import LANGS
+from .content import LANGS, subject_label
 from .datagen import SUBJECT_LABEL
 
 TOKENS: dict[str, dict] = {}
@@ -108,6 +108,10 @@ def get_student(sid: int, user: dict, write: bool = False) -> dict:
         raise HTTPException(403, "Read-only access: only the class faculty or admin can do this")
     rows[0].pop("gender", None)  # not needed by the app, so not exposed
     return rows[0]
+
+
+def weak_label(key: str) -> str:
+    return SUBJECT_LABEL.get(key) or subject_label(key)
 
 
 def get_risk(sid: int) -> dict | None:
@@ -219,16 +223,24 @@ def student_detail(sid: int, user: dict = Depends(user_dep)):
     s = get_student(sid, user)
     r = get_risk(sid)
     weekly = q("SELECT * FROM weekly WHERE student_id=? ORDER BY week", (sid,))
+    extras: dict[int, dict[str, float]] = {}
+    for e in q("SELECT week, subject, marks FROM weekly_extra WHERE student_id=?", (sid,)):
+        extras.setdefault(e["week"], {})[e["subject"]] = e["marks"]
     for w in weekly:
-        w["marks_avg"] = sum(w[k] for k in SUBJECT_LABEL) / len(SUBJECT_LABEL)
+        w["extra"] = extras.get(w["week"], {})
+        vals = [w[k] for k in SUBJECT_LABEL] + list(w["extra"].values())
+        w["marks_avg"] = sum(vals) / len(vals)
+    subjects = [{"key": k, "label": v} for k, v in SUBJECT_LABEL.items()] + [
+        {"key": r["name"], "label": r["name"], "extra": True}
+        for r in q("SELECT name FROM class_subjects WHERE cls=? ORDER BY name", (s["cls"],))]
     plans = [plan_out(p) for p in q("SELECT * FROM plans WHERE student_id=? ORDER BY id DESC", (sid,))]
     ints = q("SELECT * FROM interventions WHERE student_id=? ORDER BY id DESC", (sid,))
     can_edit = can_write(user, s["cls"])
     phone = s.get("parent_phone") if can_edit else whatsapp.mask(s.get("parent_phone"))  # principal sees it masked
     return {"student": {**s, "parent_phone": phone, "demo_number": whatsapp.is_demo(s.get("parent_phone"))},
             "can_edit": can_edit, "whatsapp_live": whatsapp.configured(),
-            "risk": r, "weekly": weekly, "plans": plans, "interventions": ints,
-            "weakest_subject_label": SUBJECT_LABEL[r["weakest_subject"]] if r else None}
+            "risk": r, "weekly": weekly, "subjects": subjects, "plans": plans, "interventions": ints,
+            "weakest_subject_label": weak_label(r["weakest_subject"]) if r else None}
 
 
 # ---------- action plans -----------------------------------------------------------
@@ -393,7 +405,8 @@ def overview(user: dict = Depends(user_dep)):
     for r in q("SELECT reasons, weakest_subject, tier FROM risk WHERE tier != 'low'"):
         for x in json.loads(r["reasons"]):
             reasons[x["label"]] = reasons.get(x["label"], 0) + 1
-        subj[SUBJECT_LABEL[r["weakest_subject"]]] = subj.get(SUBJECT_LABEL[r["weakest_subject"]], 0) + 1
+        label = weak_label(r["weakest_subject"])
+        subj[label] = subj.get(label, 0) + 1
     eff = q("""SELECT kind, COUNT(*) n, SUM(outcome='improved') improved, SUM(source='live') live FROM interventions
                WHERE outcome IS NOT NULL GROUP BY kind""")
     for e in eff:

@@ -13,7 +13,7 @@ import os
 import re
 
 from . import content
-from .content import LANGS, SUBJECT_NAME, TOPICS, ACTIONS, REASON_GROUP
+from .content import LANGS, SUBJECT_NAME, TOPICS, ACTIONS, REASON_GROUP, subject_label, subject_topics
 
 LLM_MODEL = os.environ.get("SAARTHI_LLM_MODEL", "claude-haiku-5-5")
 BANNED = ["stupid", "lazy", "dumb", "hopeless", "punish", "worthless", "will fail", "failure"]
@@ -31,8 +31,8 @@ def provider_info() -> dict:
 
 # ---------- template engine ----------------------------------------------------------
 def _template_actions(reasons: list[dict], subject_key: str) -> tuple[list[dict], list[str]]:
-    topics = TOPICS[subject_key]
-    subj = SUBJECT_NAME[subject_key]["en"]
+    topics = subject_topics(subject_key)
+    subj = subject_label(subject_key, "en")
     groups: list[str] = []
     for r in reasons:
         g = REASON_GROUP[r["key"]]
@@ -57,7 +57,7 @@ def _template_message(ctx: dict, lang: str, name: str) -> str:
     clauses = [content.REASON_CLAUSE[k][lang] for k in reasons]
     joined = content.AND[lang].join(clauses)
     primary = REASON_GROUP[reasons[0]]
-    subj = SUBJECT_NAME[ctx["weak_subject"]][lang]
+    subj = subject_label(ctx["weak_subject"], lang)
     fmt = dict(name=name, subject=subj)
     return content.BODY[lang].format(
         greeting=content.GREETING[lang], name=name, reasons=joined, cls=ctx["class"],
@@ -131,8 +131,8 @@ def build_context(student: dict, risk: dict) -> dict:
         "grade": re.sub(r"\D", "", student["cls"]),
         "risk_tier": risk["tier"],
         "reasons": [{"key": r["key"], "evidence": r["evidence"]} for r in reasons],
-        "weakest_subject": SUBJECT_NAME[subject_key]["en"],
-        "suggested_topics": TOPICS[subject_key],
+        "weakest_subject": subject_label(subject_key, "en"),
+        "suggested_topics": subject_topics(subject_key),
     }
     return {"reasons": reasons, "weak_subject": subject_key, "class": student["cls"], "llm_input": llm_input}
 

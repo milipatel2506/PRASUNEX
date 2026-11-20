@@ -228,3 +228,15 @@ table.entry th, table.entry td { padding: 6px 8px; white-space: nowrap; }
 @media (max-width: 480px) { .hbar { grid-template-columns: 1fr; } }
 
 table { position: relative; }
+
+/* subjects and tabs on the weekly data page */
+.tabs { display: flex; gap: 8px; margin: 0 0 16px; flex-wrap: wrap; }
+.tabs button { padding: 8px 16px; border: 1px solid #64748b; border-radius: var(--radius); background: var(--surface); font-weight: 600; }
+.tabs button.on { background: var(--primary); color: #fff; border-color: var(--primary); }
+.chips-row { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 14px; }
+.chip.added { background: var(--primary-weak, #dbeafe); border-color: var(--primary); display: inline-flex; align-items: center; gap: 6px; }
+.chip-x { border: 0; background: transparent; font-size: 1.1rem; line-height: 1; padding: 0 2px; color: var(--primary-ink); }
+.subject-form { display: flex; gap: 10px; align-items: end; flex-wrap: wrap; margin-bottom: 12px; }
+.subject-form label { display: grid; gap: 6px; font-weight: 600; flex: 1 1 260px; max-width: 420px; }
+
+tbody th[scope="row"] { text-transform: none; letter-spacing: normal; font-size: inherit; font-weight: 600; color: var(--ink); text-align: left; }

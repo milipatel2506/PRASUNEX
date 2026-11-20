@@ -208,6 +208,30 @@ function ContactCard({ d, sid, reload, onChanged }) {
   )
 }
 
+function WeeklyRecord({ d }) {
+  const cols = d.subjects
+  if (!d.weekly.length) return null
+  const cell = (w, c) => (c.extra ? w.extra[c.key] : w[c.key])
+  return (
+    <section className="panel">
+      <h3 className="sec">Weekly record</h3>
+      <div style={{ overflow: 'auto' }} tabIndex={0} role="region" aria-label={`Weekly record for ${d.student.name}`}>
+        <table>
+          <caption className="sr-only">Every recorded week for {d.student.name}</caption>
+          <thead><tr><th scope="col">Week</th><th scope="col">Attendance</th><th scope="col">Homework</th><th scope="col">Incidents</th>{cols.map((c) => <th scope="col" key={c.key}>{c.label}</th>)}<th scope="col">Average</th></tr></thead>
+          <tbody>
+            {[...d.weekly].reverse().map((w) => (
+              <tr key={w.week}><th scope="row">Week {w.week}</th><td>{pct(w.attendance)}</td><td>{pct(w.homework)}</td><td>{w.incidents}</td>
+                {cols.map((c) => { const v = cell(w, c); return <td key={c.key}>{v === undefined ? '-' : Math.round(v)}</td> })}
+                <td><b>{Math.round(w.marks_avg)}</b></td></tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  )
+}
+
 /* ---------- student detail + action flow ---------- */
 function StudentPanel({ sid, onChanged }) {
   const [d, setD] = useState(null)
@@ -247,6 +271,7 @@ function StudentPanel({ sid, onChanged }) {
           <div className="note" style={{ margin: 0 }}>Not scored yet. SAARTHI needs at least 4 weeks of attendance, marks and homework for this student. Enter them on the Weekly data page, and the risk score will appear here.</div>
         </section>
         <ContactCard d={d} sid={sid} reload={refresh} onChanged={onChanged} />
+      <WeeklyRecord d={d} />
       </div>
     )
   }
@@ -320,6 +345,7 @@ function StudentPanel({ sid, onChanged }) {
       </section>
 
       <ContactCard d={d} sid={sid} reload={refresh} onChanged={onChanged} />
+      <WeeklyRecord d={d} />
 
       <section className="panel">
         <div className="plan-head">

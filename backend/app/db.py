@@ -59,6 +59,7 @@ USERS = [
 MIGRATIONS = {
     "students": {"parent_name": "TEXT", "parent_phone": "TEXT"},
     "users": {"active": "INTEGER DEFAULT 1"},
+    "plans": {"asof_week": "INTEGER"},
     "messages": {"parent_phone": "TEXT", "provider": "TEXT DEFAULT 'simulated'", "provider_sid": "TEXT",
                  "error": "TEXT", "sent_at": "TEXT", "delivered_at": "TEXT", "read_at": "TEXT"},
 }

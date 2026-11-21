@@ -24,6 +24,36 @@ def _parse(ts: str) -> float:
     return time.mktime(time.strptime(ts, "%Y-%m-%d %H:%M:%S"))
 
 
+LAST_CHECK: dict[int, float] = {}
+OPEN_STATES = ("queued", "accepted", "sending", "sent")  # a real message in one of these can still change
+
+
+def _apply_status(mid: int, res: dict) -> None:
+    stamps = {"delivered": ("delivered_at", db.now()), "read": ("read_at", db.now())}
+    run("UPDATE messages SET status=?, error=? WHERE id=?", (res["status"], res["error"], mid))
+    if res["status"] in stamps:
+        col, val = stamps[res["status"]]
+        run(f"UPDATE messages SET {col}=COALESCE({col}, ?) WHERE id=?", (val, mid))
+
+
+def _refresh_real(rows: list[dict]) -> None:
+    """Pull the real delivery status from Twilio for messages that are still in flight, so nobody has to press Refresh."""
+    if not whatsapp.configured():
+        return
+    checked = 0
+    for r in rows:
+        if r.get("provider") != "twilio" or not r.get("provider_sid") or r["status"] not in OPEN_STATES:
+            continue
+        if time.time() - LAST_CHECK.get(r["id"], 0) < 10 or checked >= 5:
+            continue
+        LAST_CHECK[r["id"]] = time.time()
+        checked += 1
+        res = whatsapp.fetch_status(r["provider_sid"])
+        if res["ok"] and res["status"]:
+            _apply_status(r["id"], res)
+            r.update(q("SELECT status, error, delivered_at, read_at FROM messages WHERE id=?", (r["id"],))[0])
+
+
 def _advance(rows: list[dict]) -> None:
     """Simulated delivery: a 'sent' message becomes 'delivered' after about 2 seconds, like a real phone."""
     for r in rows:
@@ -95,6 +125,7 @@ def list_messages(user: dict = Depends(user_dep)):
                 JOIN students s ON s.id=m.student_id {scope} ORDER BY m.id DESC LIMIT 300""", args)
     rows = [r for r in rows if can_see(user, r["cls"])]
     _advance(rows)
+    _refresh_real(rows)
     for r in rows:
         r["demo_number"] = whatsapp.is_demo(r["parent_phone"])
         r["wa_link"] = wa_link(r["parent_phone"], r["body"]) if r.get("provider") == "wa_link" and can_write(user, r["cls"]) else None
@@ -137,11 +168,7 @@ def refresh_status(mid: int, user: dict = Depends(user_dep)):
     res = whatsapp.fetch_status(m["provider_sid"])
     if not res["ok"]:
         raise HTTPException(502, res["error"] or "Could not reach the WhatsApp service")
-    stamps = {"delivered": ("delivered_at", db.now()), "read": ("read_at", db.now())}
-    run("UPDATE messages SET status=?, error=? WHERE id=?", (res["status"], res["error"], mid))
-    if res["status"] in stamps:
-        col, val = stamps[res["status"]]
-        run(f"UPDATE messages SET {col}=COALESCE({col}, ?) WHERE id=?", (val, mid))
+    _apply_status(mid, res)
     return {"ok": True, "status": res["status"]}
 
 
@@ -512,6 +539,46 @@ def update_contact(sid: int, body: ContactPatch, user: dict = Depends(user_dep))
         run("UPDATE students SET parent_phone=? WHERE id=?", (whatsapp.normalize(body.parent_phone), sid))
     if body.parent_language:
         run("UPDATE students SET parent_language=? WHERE id=?", (body.parent_language, sid))
+    return {"ok": True}
+
+
+class StudentEdit(BaseModel):
+    name: str | None = Field(default=None, min_length=2, max_length=80)
+    roll: int | None = Field(default=None, ge=1, le=99)
+    cls: str | None = Field(default=None, pattern=r"^[0-9]{1,2}[A-Z]$")
+    first_gu: str | None = Field(default=None, max_length=40)
+    first_hi: str | None = Field(default=None, max_length=40)
+
+
+@app.patch("/api/students/{sid}")
+def edit_student(sid: int, body: StudentEdit, user: dict = Depends(user_dep)):
+    """Fix a typo in the name, roll number or class without losing the student's history."""
+    rows = q("SELECT * FROM students WHERE id=?", (sid,))
+    if not rows:
+        raise HTTPException(404, "Student not found")
+    cur = rows[0]
+    _writer(user, cur["cls"])
+    new_cls = body.cls or cur["cls"]
+    if new_cls != cur["cls"]:
+        _writer(user, new_cls)  # faculty can only move a student into another of their own classes
+        if new_cls not in all_classes() and user["role"] != "admin":
+            raise HTTPException(404, f"Class {new_cls} does not exist")
+    new_roll = body.roll or cur["roll"]
+    if (new_cls, new_roll) != (cur["cls"], cur["roll"]) and q("SELECT 1 FROM students WHERE cls=? AND roll=? AND id!=?", (new_cls, new_roll, sid)):
+        raise HTTPException(409, f"Class {new_cls} already has roll number {new_roll}")
+    name = " ".join(body.name.split()) if body.name else cur["name"]
+    first = name.split()[0]
+    gu = body.first_gu if body.first_gu is not None else cur["first_gu"]
+    hi = body.first_hi if body.first_hi is not None else cur["first_hi"]
+    if body.name and not (body.first_gu or body.first_hi) and first != cur["first_en"]:
+        gu, hi = first, first  # the old spellings belonged to the old first name
+    try:
+        run("UPDATE students SET name=?, first_en=?, first_gu=?, first_hi=?, cls=?, roll=? WHERE id=?",
+            (name, first, gu or first, hi or first, new_cls, new_roll, sid))
+    except sqlite3.IntegrityError:
+        raise HTTPException(409, f"Class {new_cls} already has roll number {new_roll}")
+    run("INSERT INTO activity(ts,actor,action,detail) VALUES(?,?,?,?)",
+        (db.now(), user["name"], "student_edited", f"{cur['name']} (class {cur['cls']}, roll {cur['roll']}) -> {name} (class {new_cls}, roll {new_roll})"))
     return {"ok": True}
 
 

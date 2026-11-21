@@ -1,8 +1,9 @@
 import { Fragment, useEffect, useRef, useState } from 'react'
-import { BarChart3, ClipboardList, GraduationCap, LogOut, MessageSquare, RefreshCw, ScrollText, Send, Settings as SettingsIcon, ShieldCheck, UserCog, Users, Volume2 } from 'lucide-react'
+import { BarChart3, ClipboardList, Download, Lock, GraduationCap, LogOut, MessageSquare, RefreshCw, ScrollText, Send, Settings as SettingsIcon, ShieldCheck, UserCog, Users, Volume2 } from 'lucide-react'
 import { api, hasToken, setToken } from './api'
 import { ask, DialogHost } from './dialog'
-import { AdminStudents, AdminUsers, MessagesPage, ROLE, SettingsPage, WeeklyPage } from './pages'
+import { AdminStudents, AdminUsers, MessagesPage, ROLE, SettingsPage, WeeklyPage, unsaved } from './pages'
+import { downloadCsv } from './csv'
 
 const LANG = { en: 'English', gu: 'ગુજરાતી', hi: 'हिन्दी' }
 const LANG_NAME = { en: 'English', gu: 'Gujarati', hi: 'Hindi' }
@@ -85,6 +86,8 @@ function Login({ onLogin, notice }) {
   const [show, setShow] = useState(false)
   const [err, setErr] = useState('')
   const [busy, setBusy] = useState(false)
+  const [demo, setDemo] = useState(true)
+  useEffect(() => { api('/config').then((c) => setDemo(c.demo_accounts !== false)).catch(() => {}) }, [])
   const submit = async (e) => {
     e.preventDefault()
     if (busy) return
@@ -122,6 +125,8 @@ function Login({ onLogin, notice }) {
           {err && <div className="error" role="alert" style={{ margin: 0 }}>{err}</div>}
           <div><button className="btn" type="submit" disabled={busy}>{busy ? 'Signing in...' : 'Sign in'}</button></div>
         </form>
+        {demo && (
+          <>
         <h3 className="sec" style={{ marginTop: 28 }}>Demo accounts (password: demo123)</h3>
         <ul className="accounts">
           {ACCOUNTS.map((a) => (
@@ -134,9 +139,17 @@ function Login({ onLogin, notice }) {
             </li>
           ))}
         </ul>
+          </>
+        )}
       </main>
     </div>
   )
+}
+
+// Every page has an address (#/classes/9A/12), so refresh keeps your place and the Back button works inside the app
+const parseHash = () => {
+  const [tab = 'classes', cls = '', sid = ''] = window.location.hash.replace(/^#\/?/, '').split('/')
+  return { tab: tab || 'classes', cls, sid }
 }
 
 // same rules as the server: +<country><number>, or a bare 10-digit Indian number
@@ -165,6 +178,26 @@ function ContactCard({ d, sid, reload, onChanged }) {
   const [err, setErr] = useState('')
   const [ok, setOk] = useState('')
   const [busy, setBusy] = useState(false)
+  const [detailsOpen, setDetailsOpen] = useState(false)
+  const [det, setDet] = useState({ name: '', roll: '', cls: '', first_gu: '', first_hi: '' })
+  const [myClasses, setMyClasses] = useState([])
+  const openDetails = () => {
+    setDet({ name: s.name, roll: String(s.roll), cls: s.cls, first_gu: s.first_gu || '', first_hi: s.first_hi || '' })
+    setErr(''); setOk(''); setOpen(false); setDetailsOpen(true)
+    api('/classes').then((c) => setMyClasses(c.map((x) => x.cls))).catch(() => {})
+  }
+  const saveDetails = async (e) => {
+    e.preventDefault()
+    if (busy) return
+    setBusy(true); setErr('')
+    try {
+      await api('/students/' + sid, { method: 'PATCH', body: { name: det.name, roll: Number(det.roll), cls: det.cls, first_gu: det.first_gu, first_hi: det.first_hi } })
+      setDetailsOpen(false)
+      if (det.cls !== s.cls) { onChanged(true); return }  // the student moved to another class
+      await reload(); onChanged(); setOk('Student details saved.')
+    } catch (x) { setErr(x.message) }
+    setBusy(false)
+  }
   const openEdit = () => {
     setF({ parent_name: s.parent_name, parent_phone: s.demo_number ? '' : s.parent_phone, parent_language: s.parent_language })
     setErr(''); setOk(''); setOpen(true)
@@ -189,13 +222,28 @@ function ContactCard({ d, sid, reload, onChanged }) {
     <section className="panel">
       <div className="plan-head">
         <h3>Parent contact</h3>
-        {d.can_edit && !open && <div className="row" style={{ gap: 8 }}>
+        {d.can_edit && !open && !detailsOpen && <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+          <button className="btn alt" onClick={openDetails}>Edit details</button>
           <button className="btn alt" onClick={openEdit}>{s.demo_number ? 'Add WhatsApp number' : 'Edit contact'}</button>
           <button className="btn danger" disabled={busy} onClick={remove}>Remove student</button>
         </div>}
       </div>
       {err && <div className="error" role="alert">{err}</div>}
       <div role="status">{ok && <div className="ok">{ok}</div>}</div>
+      {detailsOpen && (
+        <form className="form" onSubmit={saveDetails}>
+          <div className="two">
+            <label>Full name<input required minLength={2} value={det.name} onChange={(e) => setDet({ ...det, name: e.target.value })} /></label>
+            <label>Roll number<input required type="number" min="1" max="99" value={det.roll} onChange={(e) => setDet({ ...det, roll: e.target.value })} /></label>
+          </div>
+          <label>Class<select value={det.cls} onChange={(e) => setDet({ ...det, cls: e.target.value })}>{[...new Set([s.cls, ...myClasses])].map((c) => <option key={c} value={c}>{c}</option>)}</select></label>
+          <div className="two">
+            <label>First name in Gujarati<input value={det.first_gu} onChange={(e) => setDet({ ...det, first_gu: e.target.value })} /></label>
+            <label>First name in Hindi<input value={det.first_hi} onChange={(e) => setDet({ ...det, first_hi: e.target.value })} /></label>
+          </div>
+          <div className="row" style={{ gap: 8 }}><button className="btn" type="submit" disabled={busy}>{busy ? 'Saving...' : 'Save details'}</button><button className="btn alt" type="button" onClick={() => setDetailsOpen(false)}>Cancel</button></div>
+        </form>
+      )}
       {!open ? (
         <div className="meta">
           <span>Parent <b>{s.parent_name}</b></span>
@@ -291,6 +339,7 @@ function StudentPanel({ sid, onChanged }) {
   const target = normalizePhone(sendTo)  // the number in the box
   const mode = target ? (d.whatsapp_live ? 'auto' : 'link') : 'sim'  // auto: sent by the server; link: opens WhatsApp; sim: demo outbox
   const live = mode === 'auto'
+  const stale = !!plan && !approved && plan.asof_week != null && risk.asof_week > plan.asof_week  // new weekly data arrived after this draft
 
   const wrap = async (fn) => { setBusy(true); setErr(''); try { await fn() } catch (e) { setErr(e.message) } finally { setBusy(false) } }
   const create = () => wrap(async () => {
@@ -311,9 +360,10 @@ function StudentPanel({ sid, onChanged }) {
     const body = mode === 'auto' ? `This message is sent automatically on WhatsApp to ${who}. It cannot be undone.`
       : mode === 'link' ? `WhatsApp opens with this message ready for ${who}. Press Send there to deliver it.`
       : `This message goes to ${s.parent_name} (simulated, nothing leaves this computer). It cannot be undone.`
+    const warn = stale ? ` Note: this draft is based on older data (week ${plan.asof_week}; the latest is week ${risk.asof_week}).` : ''
     const label = mode === 'auto' ? 'Send on WhatsApp' : mode === 'link' ? 'Approve and open WhatsApp' : 'Approve (simulated)'
     // ask first, before the button is disabled, so keyboard focus can return to it afterwards
-    if (!(await ask({ title: 'Approve and send?', body, confirmLabel: label }))) return
+    if (!(await ask({ title: 'Approve and send?', body: body + warn, confirmLabel: label }))) return
     wrap(async () => {
       if (target && target !== s.parent_phone) await api(`/students/${sid}/contact`, { method: 'PATCH', body: { parent_phone: target } })
       const out = await api(`/plans/${plan.id}/approve`, { method: 'POST', body: { actions: plan.actions, message: msg, language: lang, handoff: mode === 'link' } })
@@ -374,6 +424,7 @@ function StudentPanel({ sid, onChanged }) {
           {plan && <Tag kind={plan.status}>{plan.status === 'approved' ? 'Approved and sent' : 'Draft, needs your approval'}</Tag>}
         </div>
         {err && <div className="error" role="alert" style={{ margin: '0 0 12px' }}>{err}</div>}
+        {stale && <div className="flag" role="status" style={{ marginBottom: 12 }}>This draft was written from week {plan.asof_week} data, and week {risk.asof_week} has been recorded since. Press Redraft so the reasons and message match the latest data.</div>}
         {!plan && !d.can_edit && <p className="muted" style={{ margin: 0 }}>Read-only view: only the class faculty or admin can create and send plans.</p>}
         {!plan && d.can_edit && (
           <>
@@ -508,26 +559,31 @@ function AddStudent({ cls, onDone, onCancel }) {
   )
 }
 
-function Classes({ canEdit }) {
+function Classes({ canEdit, route, go }) {
   const [adding, setAdding] = useState(false)
   const [cls, setCls] = useState([])
-  const [cur, setCur] = useState(null)
   const [list, setList] = useState([])
-  const [sel, setSel] = useState(null)
   const [all, setAll] = useState(false)
   const [loading, setLoading] = useState(true)
   const [err, setErr] = useState('')
+  // the class and student come from the page address, so refresh and Back keep your place
+  const cur = route.cls && cls.some((c) => c.cls === route.cls) ? route.cls : (cls[0] ? cls[0].cls : null)
+  const sel = route.sid ? Number(route.sid) : null
+  const setCur = (c) => go('classes', c)
+  const setSel = (id) => go('classes', cur, id || '')
   const curRef = useRef(null)
   curRef.current = cur
 
-  const loadClasses = () => api('/classes').then((c) => { setErr(''); setCls(c); if ((!curRef.current || !c.some((x) => x.cls === curRef.current)) && c.length) setCur(c[0].cls) }).catch((e) => setErr(e.message))
+  const loadClasses = () => api('/classes').then((c) => { setErr(''); setCls(c) }).catch((e) => setErr(e.message))
   const loadList = () => {
     const c = cur
     if (!c) return
     api('/students?cls=' + c).then((r) => { if (curRef.current === c) { setList(r); setErr('') } }).catch((e) => setErr(e.message)).finally(() => { if (curRef.current === c) setLoading(false) })
   }
   useEffect(() => { loadClasses() }, [])
-  useEffect(() => { setSel(null); setList([]); setLoading(true); loadList() }, [cur])
+  useEffect(() => { setList([]); setLoading(true); loadList() }, [cur])
+  const exportList = () => downloadCsv(`class-${cur}-risk.csv`, ['Class', 'Roll', 'Student', 'Risk %', 'Level', 'Reasons', 'Plan'],
+    list.map((x) => [cur, x.roll, x.name, x.tier === 'unscored' ? '' : Math.round(x.risk * 100), TIER[x.tier], x.reasons.map((r) => r.label).join('; '), x.plan_status === 'approved' ? 'Sent' : x.plan_status ? 'Draft' : '']))
 
   const flagged = list.filter((s) => s.tier === 'high' || s.tier === 'medium')
   const shown = all ? list : flagged
@@ -549,7 +605,10 @@ function Classes({ canEdit }) {
         <div>
           <div className="list-head">
             <div><b>Students</b> <span className="muted small">{all ? `all ${list.length} students` : `${flagged.length} need attention`}</span></div>
-            <button className="btn alt" onClick={() => setAll(!all)}>{all ? 'Show only flagged' : 'Show all students'}</button>
+            <div className="row" style={{ gap: 8 }}>
+              <button className="btn alt" onClick={() => setAll(!all)}>{all ? 'Show only flagged' : 'Show all students'}</button>
+              {list.length > 0 && <button className="btn alt" onClick={exportList} aria-label="Export this class as CSV"><Download size={16} aria-hidden="true" />CSV</button>}
+            </div>
           </div>
           <div className="list">
             {shown.map((s) => (
@@ -711,7 +770,20 @@ export default function App() {
   const [user, setUser] = useState(null)
   const [ready, setReady] = useState(false)
   const [notice, setNotice] = useState('')
-  const [tab, setTab] = useState('classes')
+  const [route, setRoute] = useState(parseHash)
+  const tab = route.tab
+  const [flash, setFlash] = useState(null)
+  useEffect(() => {
+    const f = () => setRoute(parseHash())
+    window.addEventListener('hashchange', f)
+    return () => window.removeEventListener('hashchange', f)
+  }, [])
+  useEffect(() => { if (!flash) return undefined; const t = setTimeout(() => setFlash(null), 7000); return () => clearTimeout(t) }, [flash])
+  const go = async (k, c = '', sid = '') => {
+    if (k !== tab && unsaved.current && !(await ask({ title: 'Leave without saving?', body: 'You have weekly marks that are not saved. If you leave this page they are lost.', confirmLabel: 'Leave page', danger: true }))) return
+    unsaved.current = false
+    window.location.hash = '/' + [k, c, sid].filter(Boolean).join('/')
+  }
 
   useEffect(() => {
     try { if (window.speechSynthesis) window.speechSynthesis.getVoices() } catch { /* voices load lazily */ }
@@ -722,9 +794,19 @@ export default function App() {
     return () => window.removeEventListener('saarthi-logout', out)
   }, [])
   if (!ready) return <div className="page" role="status">Loading...</div>
-  if (!user) return <Login notice={notice} onLogin={(u) => { setNotice(''); setUser(u); setTab('classes') }} />
+  if (!user) return <Login notice={notice} onLogin={(u) => { setNotice(''); setUser(u); window.location.hash = '/classes' }} />
 
   const role = user.role
+  const changePassword = async () => {
+    const v = await ask({ title: 'Change your password', body: 'Choose a new password of at least 8 characters. Your other devices are signed out.', confirmLabel: 'Change password',
+      fields: [{ key: 'current', label: 'Current password', type: 'password', autoComplete: 'current-password' },
+        { key: 'new', label: 'New password', type: 'password', autoComplete: 'new-password', minLength: 8 },
+        { key: 'again', label: 'New password again', type: 'password', autoComplete: 'new-password', minLength: 8 }] })
+    if (!v) return
+    if (v.new !== v.again) { setFlash({ kind: 'error', text: 'The two new passwords did not match. Nothing was changed.' }); return }
+    try { await api('/me/password', { method: 'POST', body: { current: v.current, new: v.new } }); setFlash({ kind: 'ok', text: 'Password changed.' }) }
+    catch (e) { setFlash({ kind: 'error', text: e.message }) }
+  }
   const all = role !== 'teacher'
   const T = {
     classes: [all ? 'All classes' : 'My classes', Users, 'Risk radar', 'Students ranked by risk of falling behind'],
@@ -751,7 +833,7 @@ export default function App() {
           {order.map((k) => {
             const Icon = T[k][1]
             return (
-              <button key={k} className={tab === k ? 'on' : ''} aria-current={tab === k ? 'page' : undefined} onClick={() => setTab(k)}>
+              <button key={k} className={tab === k ? 'on' : ''} aria-current={tab === k ? 'page' : undefined} onClick={() => go(k)}>
                 <Icon size={18} aria-hidden="true" />{T[k][0]}
               </button>
             )
@@ -759,12 +841,14 @@ export default function App() {
         </nav>
         <div className="who">
           <div className="who-row"><span className="avatar" aria-hidden="true">{initials(user.name)}</span><div><b>{user.name}</b><small>{ROLE[role]}</small></div></div>
+          <button className="signout" style={{ marginBottom: 8 }} onClick={changePassword}><Lock size={16} aria-hidden="true" />Change password</button>
           <button className="signout" onClick={() => { api('/logout', { method: 'POST' }).catch(() => {}); setToken(''); setUser(null) }}><LogOut size={16} aria-hidden="true" />Sign out</button>
         </div>
       </aside>
       <main className="main" id="main" tabIndex={-1}>
         <PageHead title={cur[2]} sub={cur[3]} />
-        {tab === 'classes' && <Classes canEdit={role !== 'principal'} />}
+        {flash && <div className={flash.kind === 'ok' ? 'ok' : 'error'} role={flash.kind === 'ok' ? 'status' : 'alert'} style={{ margin: '0 0 14px' }}>{flash.text}</div>}
+        {tab === 'classes' && <Classes canEdit={role !== 'principal'} route={route} go={go} />}
         {tab === 'weekly' && <WeeklyPage readOnly={role === 'principal'} />}
         {tab === 'messages' && <MessagesPage />}
         {tab === 'overview' && <Overview />}

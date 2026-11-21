@@ -499,3 +499,55 @@ def test_password_reset_signs_the_person_out(client):
     uid = next(u["id"] for u in client.get("/api/admin/users", headers=ha).json() if u["username"] == "rina")
     assert client.patch(f"/api/admin/users/{uid}", json={"password": "newpassword1"}, headers=ha).status_code == 200
     assert client.get("/api/me", headers=h).status_code == 401
+
+
+def test_faculty_can_fix_a_students_name_roll_and_class(client):
+    h = login(client)  # hetal: 9A, 9B
+    s = client.get("/api/students?cls=9A", headers=h).json()[0]
+    assert client.patch(f"/api/students/{s['id']}", json={"name": "Jay Thakar", "roll": 35}, headers=h).status_code == 200
+    d = client.get(f"/api/students/{s['id']}", headers=h).json()
+    assert d["student"]["name"] == "Jay Thakar" and d["student"]["roll"] == 35 and d["student"]["first_en"] == "Jay"
+    assert len(d["weekly"]) == 8  # history is kept
+    taken = client.get("/api/students?cls=9A", headers=h).json()[1]["roll"]
+    assert client.patch(f"/api/students/{s['id']}", json={"roll": taken}, headers=h).status_code == 409
+    assert client.patch(f"/api/students/{s['id']}", json={"cls": "9B", "roll": 40}, headers=h).status_code == 200  # own class
+    assert client.patch(f"/api/students/{s['id']}", json={"cls": "8A", "roll": 40}, headers=h).status_code == 403  # not theirs
+    assert client.patch(f"/api/students/{s['id']}", json={"name": "X Y"}, headers=login(client, "principal")).status_code == 403
+    assert client.patch(f"/api/students/{s['id']}", json={"name": "X Y"}, headers=login(client, "nikhil")).status_code == 403
+
+
+def test_plan_records_the_week_it_was_based_on(client):
+    h = login(client)
+    s = flagged(client, h)
+    plan = client.post(f"/api/students/{s['id']}/plan", json={}, headers=h).json()
+    assert plan["asof_week"] == 8
+    _week(client, h, "9A")
+    d = client.get(f"/api/students/{s['id']}", headers=h).json()
+    assert d["risk"]["asof_week"] == 9 and d["plans"][0]["asof_week"] == 8  # the draft is now one week behind
+
+
+def test_twilio_status_refreshes_by_itself(client, monkeypatch):
+    from app import whatsapp, extra
+    monkeypatch.setenv("TWILIO_ACCOUNT_SID", "ACx"); monkeypatch.setenv("TWILIO_AUTH_TOKEN", "t"); monkeypatch.setenv("TWILIO_WHATSAPP_FROM", "+14155238886")
+    monkeypatch.setattr(whatsapp, "send", lambda to, body: {"ok": True, "sid": "SM1", "status": "queued", "error": None})
+    monkeypatch.setattr(whatsapp, "fetch_status", lambda sid: {"ok": True, "status": "delivered", "error": None})
+    extra.LAST_CHECK.clear()
+    h = login(client)
+    s = flagged(client, h)
+    client.patch(f"/api/students/{s['id']}/contact", json={"parent_phone": "+919876543210"}, headers=h)
+    out = _approve(client, h, s["id"], handoff=False).json()
+    msg = next(m for m in client.get("/api/messages", headers=h).json() if m["id"] == out["message_id"])
+    assert msg["status"] == "delivered" and msg["delivered_at"]  # no Refresh click needed
+
+
+def test_change_own_password_and_hide_demo_accounts(client, monkeypatch):
+    h = login(client, "rina")
+    assert client.post("/api/me/password", json={"current": "wrong", "new": "brandnew123"}, headers=h).status_code == 400
+    assert client.post("/api/me/password", json={"current": "demo123", "new": "short"}, headers=h).status_code == 422
+    assert client.post("/api/me/password", json={"current": "demo123", "new": "brandnew123"}, headers=h).status_code == 200
+    assert client.get("/api/me", headers=h).status_code == 200  # this session continues
+    assert client.post("/api/login", json={"username": "rina", "password": "demo123"}).status_code == 401
+    assert client.post("/api/login", json={"username": "rina", "password": "brandnew123"}).status_code == 200
+    assert client.get("/api/config").json() == {"demo_accounts": True}
+    monkeypatch.setenv("SAARTHI_HIDE_DEMO", "1")
+    assert client.get("/api/config").json() == {"demo_accounts": False}

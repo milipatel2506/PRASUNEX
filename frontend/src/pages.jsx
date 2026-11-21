@@ -2,6 +2,10 @@ import { useEffect, useRef, useState } from 'react'
 import { Download, RefreshCw, Upload } from 'lucide-react'
 import { api } from './api'
 import { ask } from './dialog'
+import { downloadCsv } from './csv'
+
+// true while the weekly entry form holds numbers that are not saved yet; the app asks before leaving the page
+export const unsaved = { current: false }
 
 export const ROLE = { teacher: 'Faculty', principal: 'Principal', admin: 'Admin' }
 const LANG = { en: 'English', gu: 'ગુજરાતી', hi: 'हिन्दी' }
@@ -25,6 +29,8 @@ export function MessagesPage() {
   useEffect(() => { load(); const t = setInterval(() => { if (!document.hidden) load() }, 3000); return () => clearInterval(t) }, [])
   useEffect(() => { if (rows && rows.length && (sel === null || !rows.some((r) => r.id === sel))) setSel(rows[0].id) }, [rows])
   const m = rows && rows.find((r) => r.id === sel)
+  const exportRows = () => downloadCsv('messages.csv', ['Student', 'Class', 'Parent', 'Phone (masked)', 'Language', 'Status', 'Sent', 'Delivered', 'Read'],
+    (rows || []).map((r) => [r.student_name, r.cls, r.parent_name, r.parent_phone, LANG_NAME[r.language], STATUS[r.status] || r.status, r.sent_at, r.delivered_at, r.read_at]))
 
   const act = async (path) => {
     setBusy(true)
@@ -35,6 +41,7 @@ export function MessagesPage() {
   return (
     <div className="page">
       <Err>{err}</Err>
+      {rows.length > 0 && <div style={{ marginBottom: 12 }}><button className="btn alt" onClick={exportRows}><Download size={16} aria-hidden="true" />Export CSV</button></div>}
       {rows.length === 0 ? (
         <div className="panel"><h3>No messages yet</h3><p className="muted">When a teacher approves a parent message, it is sent and appears here with its delivery status.</p></div>
       ) : (
@@ -112,8 +119,21 @@ export function WeeklyPage({ readOnly = false }) {
   const [busy, setBusy] = useState(false)
   const [newSubject, setNewSubject] = useState('')
   const [subBusy, setSubBusy] = useState(false)
+  const [dirty, setDirty] = useState(false)  // numbers typed but not saved
   const [saved, setSaved] = useState(false)  // the form was just saved: stops a second click adding another week
   const curCls = useRef('')
+  useEffect(() => { unsaved.current = dirty && view === 'enter'; return () => { unsaved.current = false } }, [dirty, view])
+  useEffect(() => {
+    if (!dirty) return undefined
+    const warn = (e) => { e.preventDefault(); e.returnValue = '' }
+    window.addEventListener('beforeunload', warn)
+    return () => window.removeEventListener('beforeunload', warn)
+  }, [dirty])
+  const switchClass = async (c) => {
+    if (c === cls) return
+    if (dirty && !(await ask({ title: 'Switch class without saving?', body: `The numbers you typed for class ${cls} are not saved. Switching classes discards them.`, confirmLabel: 'Switch class', danger: true }))) return
+    setCls(c)
+  }
 
   useEffect(() => { api('/classes').then((c) => { setClasses(c); if (c[0]) setCls(c[0].cls) }).catch((e) => setErr(e.message)) }, [])
 
@@ -134,8 +154,8 @@ export function WeeklyPage({ readOnly = false }) {
       }))
     }).catch((e) => setErr(e.message))
   }
-  useEffect(() => { curCls.current = cls; setRows([]); setDone(''); setErr(''); setSaved(false); load() }, [cls])
-  const set = (id, k, val) => { setSaved(false); setRows((rs) => rs.map((r) => (r.id === id ? { ...r, v: { ...r.v, [k]: val } } : r))) }
+  useEffect(() => { curCls.current = cls; setRows([]); setDone(''); setErr(''); setSaved(false); setDirty(false); load() }, [cls])
+  const set = (id, k, val) => { setSaved(false); setDirty(true); setRows((rs) => rs.map((r) => (r.id === id ? { ...r, v: { ...r.v, [k]: val } } : r))) }
 
   const addSubject = async (e) => {
     e.preventDefault()
@@ -179,7 +199,7 @@ export function WeeklyPage({ readOnly = false }) {
         maths: Number(r.v.maths), science: Number(r.v.science), english: Number(r.v.english), social: Number(r.v.social), language: Number(r.v.language),
         extra: Object.fromEntries(subjects.extra.map((n) => [n, Number(r.v['x:' + n])])) })) } })
       setDone(`Saved week ${rows[0] ? rows[0].week : ''} for ${res.saved} students. Risk scores were updated for ${res.scored} of them.`)
-      setSaved(true)
+      setSaved(true); setDirty(false)
       await load()
     } catch (e) { setErr(e.message) }
     setBusy(false)
@@ -187,7 +207,7 @@ export function WeeklyPage({ readOnly = false }) {
   return (
     <div className="page">
       <div className="seg" role="group" aria-label="Class">
-        {classes.map((c) => <button key={c.cls} aria-pressed={cls === c.cls} className={cls === c.cls ? 'on' : ''} onClick={() => setCls(c.cls)}><b>Class {c.cls}</b></button>)}
+        {classes.map((c) => <button key={c.cls} aria-pressed={cls === c.cls} className={cls === c.cls ? 'on' : ''} onClick={() => switchClass(c.cls)}><b>Class {c.cls}</b></button>)}
       </div>
       {!readOnly && (
       <div className="tabs" role="group" aria-label="Weekly data view">
@@ -289,11 +309,19 @@ function PastWeeks({ cls }) {
     setSaving(false)
   }
   const student = h.students.find((x) => x.id === sid)
+  const exportAll = () => downloadCsv(`class-${cls}-weekly.csv`,
+    ['Class', 'Roll', 'Student', 'Week', 'Attendance %', 'Homework %', 'Incidents', ...cols.map(([, l]) => l), 'Average'],
+    h.students.flatMap((st) => h.weeks.filter((w) => st.weeks[w]).map((w) => {
+      const c = st.weeks[w]
+      return [cls, st.roll, st.name, w, Math.round(c.attendance * 100), Math.round(c.homework * 100), c.incidents,
+        ...cols.map(([k]) => (c.marks[k] === undefined ? '' : Math.round(c.marks[k]))), avg(c) === '-' ? '' : avg(c)]
+    })))
   return (
     <div>
       <div className="tabs" role="group" aria-label="How to view past weeks">
         <button aria-pressed={mode === 'week'} className={mode === 'week' ? 'on' : ''} onClick={() => setMode('week')}>By week (whole class)</button>
         <button aria-pressed={mode === 'student'} className={mode === 'student' ? 'on' : ''} onClick={() => setMode('student')}>By student (all weeks)</button>
+        <button className="btn alt" onClick={exportAll}><Download size={16} aria-hidden="true" />Export CSV</button>
       </div>
       {mode === 'week' ? (
         <>

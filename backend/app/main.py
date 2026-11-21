@@ -1,6 +1,7 @@
 """SAARTHI API: risk radar, explainable reasons, AI action plans, parent messages, outcome tracking."""
 from __future__ import annotations
 import json
+import os
 import re
 import secrets
 import time
@@ -187,6 +188,30 @@ def me(user: dict = Depends(user_dep)):
     return {k: user[k] for k in ("username", "name", "role", "classes")}
 
 
+@app.get("/api/config")
+def public_config():
+    """Non-sensitive display settings for the sign-in page. Set SAARTHI_HIDE_DEMO=1 to hide the demo account list."""
+    return {"demo_accounts": os.environ.get("SAARTHI_HIDE_DEMO") != "1"}
+
+
+class PasswordChange(BaseModel):
+    current: str
+    new: str = Field(min_length=8, max_length=100)
+
+
+@app.post("/api/me/password")
+def change_my_password(body: PasswordChange, user: dict = Depends(user_dep)):
+    rows = q("SELECT id, password FROM users WHERE username=?", (user["username"],))
+    if not rows or not db.check_pw(body.current, rows[0]["password"]):
+        raise HTTPException(400, "Your current password is not correct")
+    if body.new == body.current:
+        raise HTTPException(400, "Choose a password different from the current one")
+    run("UPDATE users SET password=? WHERE id=?", (db.hash_pw(body.new), rows[0]["id"]))
+    for t in [t for t, u in TOKENS.items() if u["username"] == user["username"] and t != user["token"]]:
+        TOKENS.pop(t, None)  # other sessions on other devices end; this one stays
+    return {"ok": True}
+
+
 @app.get("/api/health")
 def health():
     return {"ok": True, "languages": LANGS}
@@ -266,9 +291,9 @@ def make_plan(sid: int, body: PlanReq, user: dict = Depends(user_dep)):
     if r is None:
         raise HTTPException(409, "Not scored yet: enter at least 4 weeks of data on the Weekly data page first")
     res = actions.generate_plan(s, r, lang)
-    pid = run("INSERT INTO plans(student_id,created_at,provider,language,actions,topics,message,flags) VALUES(?,?,?,?,?,?,?,?)",
+    pid = run("INSERT INTO plans(student_id,created_at,provider,language,actions,topics,message,flags,asof_week) VALUES(?,?,?,?,?,?,?,?,?)",
               (sid, db.now(), res["provider"], lang, json.dumps(res["actions"]), json.dumps(res["topics"], ensure_ascii=False),
-               res["message"], json.dumps(res["flags"])))
+               res["message"], json.dumps(res["flags"]), r["asof_week"]))
     _log(s, res, pid)
     return plan_out(q("SELECT * FROM plans WHERE id=?", (pid,))[0])
 

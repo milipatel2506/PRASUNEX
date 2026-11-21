@@ -117,7 +117,9 @@ textarea, select, input:not([type='checkbox']):not([type='file']) { border-color
 .empty { padding: 28px 18px; color: var(--muted); }
 
 /* ---------- student detail ---------- */
-.stack { display: grid; gap: 20px; }
+.stack { display: grid; grid-template-columns: minmax(0, 1fr); gap: 20px; }
+.grid2 > *, .stack > * { min-width: 0; }
+textarea, select, input { max-width: 100%; }
 .hdr { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 18px; }
 .hdr h2 { font-size: 1.375rem; }
 .meta { display: flex; flex-wrap: wrap; gap: 6px 22px; margin-top: 6px; color: var(--muted); font-size: 0.9375rem; }
@@ -191,7 +193,7 @@ tr.sel td { background: var(--primary-weak); }
 .form { display: grid; gap: 12px; }
 .form label { display: grid; gap: 4px; font-size: 0.875rem; color: var(--ink-2); font-weight: 600; }
 .form .two { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr)); gap: 12px; }
-input:not([type]), input[type=text], input[type=password], input[type=number], input[type=search], select {
+input:not([type]), input[type=text], input[type=password], input[type=number], input[type=search], input[type=tel], input[type=email], select {
   font: inherit; border: 1px solid var(--line-strong); border-radius: var(--radius); padding: 9px 11px;
   background: #fff; color: var(--ink); min-height: 40px; width: 100%; font-weight: 400; }
 .pw { display: flex; gap: 8px; }

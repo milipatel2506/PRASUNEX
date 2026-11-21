@@ -149,7 +149,8 @@ export function WeeklyPage({ readOnly = false }) {
       setRows(r.map((s) => {
         const last = s.last || BLANK  // a brand-new student has no earlier week to copy from
         const v = { ...last, attendance: Math.round(last.attendance * 100), homework: Math.round(last.homework * 100) }
-        for (const n of sub.extra) v['x:' + n] = (s.last_extra || {})[n] ?? ''  // no earlier marks: left empty so they are entered, not guessed
+        for (const k of ['maths', 'science', 'english', 'social', 'language']) v[k] = Math.round(Number(v[k]) * 10) / 10  // one decimal, not 58.07603
+        for (const n of sub.extra) { const x = (s.last_extra || {})[n]; v['x:' + n] = x === null || x === undefined ? '' : Math.round(x * 10) / 10 }  // no earlier marks: left empty so they are entered, not guessed
         return { id: s.id, name: s.name, roll: s.roll, week: s.next_week, v }
       }))
     }).catch((e) => setErr(e.message))
